@@ -24,6 +24,7 @@
 - ./start_all.sh
 - ./create_topics.sh
 - python send_factory_data.py
+- ./flink-test/apply_job.sh ./flink-test/job_summary.sql
 
 ## Flink ジョブ反映
 - ./flink-test/apply_job.sh ./flink-test/job.sql
