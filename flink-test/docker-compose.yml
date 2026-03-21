@@ -1,0 +1,26 @@
+services:
+  flink-jobmanager:
+    build: .
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    networks:
+      - stream-shared
+
+  flink-taskmanager:
+    build: .
+    container_name: flink-taskmanager
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+    networks:
+      - stream-shared
+
+networks:
+  stream-shared:
+    external: true
