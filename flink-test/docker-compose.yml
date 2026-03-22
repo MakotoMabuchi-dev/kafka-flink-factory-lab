@@ -58,6 +58,8 @@ services:
       - "8081:8081"
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
     networks:
       - stream-shared
 
@@ -69,6 +71,9 @@ services:
       - flink-jobmanager
     environment:
       - JOB_MANAGER_RPC_ADDRESS=flink-jobmanager
+      - TASK_MANAGER_NUMBER_OF_TASK_SLOTS=4
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
     networks:
       - stream-shared
 
