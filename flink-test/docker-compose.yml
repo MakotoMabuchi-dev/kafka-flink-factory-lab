@@ -1,4 +1,55 @@
 services:
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - ./minio-data:/data
+    networks:
+      - stream-shared
+
+  mc:
+    image: minio/mc
+    container_name: mc
+    depends_on:
+      - minio
+    networks:
+      - stream-shared
+    entrypoint: >
+      /bin/sh -c "
+      until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin; do echo Waiting for MinIO; sleep 1; done;
+      /usr/bin/mc mb --ignore-existing local/warehouse;
+      tail -f /dev/null;
+      "
+  iceberg-rest:
+    image: tabulario/iceberg-rest
+    container_name: iceberg-rest
+    depends_on:
+      - minio
+      - mc
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      - CATALOG_URI=jdbc:sqlite:file:/var/lib/iceberg-rest/catalog.db
+    volumes:
+      - ./iceberg-rest-data:/var/lib/iceberg-rest
+    networks:
+      - stream-shared
+
   flink-jobmanager:
     build: .
     container_name: flink-jobmanager
