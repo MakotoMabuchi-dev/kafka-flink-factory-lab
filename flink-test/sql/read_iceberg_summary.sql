@@ -12,7 +12,7 @@ SET 'sql-client.execution.result-mode' = 'TABLEAU';
 --   - product_summary_iceberg を SELECT する
 --
 -- Usage:
---   ./read_iceberg.sh
+--   python3 scripts/lab_cli.py read-iceberg
 -- ============================================
 
 CREATE CATALOG lakehouse WITH (

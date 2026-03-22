@@ -69,6 +69,7 @@ Kafka 接続:
 from __future__ import annotations
 
 import json
+import os
 import random
 import threading
 import time
@@ -109,8 +110,19 @@ class Difficulty(str, Enum):
     HARSH = "HARSH"
 
 
-# ここを書き換えるだけで難易度を変えられる
-CURRENT_DIFFICULTY = Difficulty.IDEAL
+def resolve_difficulty() -> Difficulty:
+    """
+    環境変数があれば難易度を優先し、なければ IDEAL を返す。
+    """
+    raw_value = os.environ.get("FACTORY_DIFFICULTY", Difficulty.IDEAL.value).strip().upper()
+    try:
+        return Difficulty(raw_value)
+    except ValueError:
+        print(f"[WARN] Unknown FACTORY_DIFFICULTY='{raw_value}'. Falling back to IDEAL.")
+        return Difficulty.IDEAL
+
+
+CURRENT_DIFFICULTY = resolve_difficulty()
 
 
 @dataclass
