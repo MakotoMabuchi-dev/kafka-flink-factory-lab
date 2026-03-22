@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import venv
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 
@@ -56,11 +57,13 @@ def run(
     env: dict[str, str] | None = None,
     capture_output: bool = False,
     check: bool = True,
+    stdin: int | None = subprocess.DEVNULL,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=str(cwd) if cwd else None,
         env=env,
+        stdin=stdin,
         text=True,
         capture_output=capture_output,
         check=check,
@@ -102,6 +105,11 @@ def ensure_shared_network() -> None:
         run(["docker", "network", "create", SHARED_NETWORK])
 
 
+def ensure_bind_mount_dirs() -> None:
+    (FLINK_DIR / "minio-data").mkdir(parents=True, exist_ok=True)
+    (FLINK_DIR / "iceberg-rest-data").mkdir(parents=True, exist_ok=True)
+
+
 def wait_for_container(container_name: str, retries: int = 30) -> None:
     for _ in range(retries):
         result = run(
@@ -126,9 +134,33 @@ def ensure_container_running(container_name: str) -> None:
         fail(f"Container '{container_name}' is not running.")
 
 
+def wait_for_kafka_ready(retries: int = 30) -> None:
+    log("Waiting for Kafka broker...")
+    for _ in range(retries):
+        result = run(
+            [
+                "docker",
+                "exec",
+                KAFKA_CONTAINER,
+                "kafka-topics",
+                "--list",
+                "--bootstrap-server",
+                "localhost:29092",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            log("Kafka broker is ready.")
+            return
+        time.sleep(2)
+    fail("Kafka broker did not become ready in time.")
+
+
 def start_stack() -> None:
     wait_for_docker_daemon()
     ensure_shared_network()
+    ensure_bind_mount_dirs()
 
     log("Starting Kafka stack...")
     run(["docker", "compose", "up", "-d"], cwd=KAFKA_DIR)
@@ -147,6 +179,7 @@ def start_stack() -> None:
     ):
         wait_for_container(container)
 
+    wait_for_kafka_ready()
     verify_warehouse_bucket()
     create_topics()
 
@@ -176,7 +209,6 @@ def create_topics() -> None:
             [
                 "docker",
                 "exec",
-                "-i",
                 KAFKA_CONTAINER,
                 "kafka-topics",
                 "--create",
@@ -186,7 +218,7 @@ def create_topics() -> None:
                 "--bootstrap-server",
                 "localhost:29092",
             ],
-            check=False,
+            check=True,
         )
 
 
@@ -195,7 +227,6 @@ def list_topics() -> None:
         [
             "docker",
             "exec",
-            "-i",
             KAFKA_CONTAINER,
             "kafka-topics",
             "--list",
@@ -205,16 +236,20 @@ def list_topics() -> None:
     )
 
 
-def verify_warehouse_bucket() -> None:
+def verify_warehouse_bucket(retries: int = 30) -> None:
     log("Verifying MinIO warehouse bucket...")
-    result = run(
-        ["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "ls", "local/warehouse"],
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        fail("MinIO bucket 'warehouse' is not available.")
-    log("MinIO bucket 'warehouse' is ready.")
+    for _ in range(retries):
+        result = run(
+            ["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "ls", "local/warehouse"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            log("MinIO bucket 'warehouse' is ready.")
+            return
+        time.sleep(2)
+
+    fail("MinIO bucket 'warehouse' is not available.")
 
 
 def resolve_sql_path(raw_path: str | None, default_path: Path) -> Path:
@@ -233,10 +268,35 @@ def copy_sql_to_container(local_path: Path, container_path: str) -> None:
     run(["docker", "cp", str(local_path), f"{FLINK_JOBMANAGER}:{container_path}"])
 
 
-def execute_sql_file(local_path: Path, container_path: str) -> None:
+def execute_sql_file(
+    local_path: Path,
+    container_path: str,
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
     ensure_container_running(FLINK_JOBMANAGER)
     copy_sql_to_container(local_path, container_path)
-    run(["docker", "exec", "-i", FLINK_JOBMANAGER, "./bin/sql-client.sh", "-f", container_path])
+    return run(
+        ["docker", "exec", FLINK_JOBMANAGER, "./bin/sql-client.sh", "-f", container_path],
+        capture_output=capture_output,
+    )
+
+
+def execute_sql_text(
+    sql_text: str,
+    container_path: str,
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    RUNTIME_DIR.mkdir(exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", suffix=".sql", dir=RUNTIME_DIR, delete=False) as temp_file:
+        temp_file.write(sql_text)
+        temp_path = Path(temp_file.name)
+
+    try:
+        return execute_sql_file(temp_path, container_path, capture_output=capture_output)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def apply_sql(sql_path: Path) -> None:
@@ -246,6 +306,42 @@ def apply_sql(sql_path: Path) -> None:
 
 def read_iceberg(sql_path: Path) -> None:
     log(f"Reading Iceberg summary with: {sql_path}")
+    if sql_path != DEFAULT_ICEBERG_READ_SQL:
+        execute_sql_file(sql_path, "/opt/flink/read_iceberg_summary.sql")
+        return
+
+    inspect_sql = """SET 'sql-client.execution.result-mode' = 'TABLEAU';
+
+CREATE CATALOG lakehouse WITH (
+    'type' = 'iceberg',
+    'catalog-type' = 'rest',
+    'uri' = 'http://iceberg-rest:8181',
+    'warehouse' = 's3://warehouse/',
+    'io-impl' = 'org.apache.iceberg.aws.s3.S3FileIO',
+    's3.endpoint' = 'http://minio:9000',
+    's3.access-key-id' = 'minioadmin',
+    's3.secret-access-key' = 'minioadmin',
+    's3.path-style-access' = 'true',
+    'client.region' = 'us-east-1'
+);
+
+CREATE DATABASE IF NOT EXISTS lakehouse.lab;
+USE CATALOG lakehouse;
+USE lab;
+SHOW TABLES;
+"""
+    inspect_result = execute_sql_text(
+        inspect_sql,
+        "/opt/flink/read_iceberg_inspect.sql",
+        capture_output=True,
+    )
+    if inspect_result.stdout:
+        print(inspect_result.stdout, end="")
+
+    if "product_summary_iceberg" not in inspect_result.stdout:
+        warn("Iceberg table 'product_summary_iceberg' does not exist yet. Run 'run iceberg' first.")
+        return
+
     execute_sql_file(sql_path, "/opt/flink/read_iceberg_summary.sql")
 
 
@@ -257,7 +353,6 @@ def watch_topic(topic: str, *, from_beginning: bool = False, max_messages: int |
     command = [
         "docker",
         "exec",
-        "-i",
         KAFKA_CONTAINER,
         "kafka-console-consumer",
         "--topic",
@@ -320,6 +415,9 @@ class LabConsole:
         self.producer_process: subprocess.Popen[str] | None = None
         self.python_path: Path | None = None
         self.stack_started = False
+        self.console_input = sys.stdin
+        self.console_output = sys.stdout
+        self.producer_log_handle: os.TextIOWrapper | None = None
 
     def cleanup(self) -> None:
         if self.cleanup_done:
@@ -329,13 +427,45 @@ class LabConsole:
         print()
         log("Cleaning up lab environment...")
         self.stop_producer()
-        if self.stack_started:
-            stop_stack(quiet=True)
+        stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
         shutil.rmtree(TEMP_VENV_DIR, ignore_errors=True)
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
+        self.close_console_streams()
         log("Lab environment removed.")
+
+    def setup_console_streams(self) -> None:
+        if os.name == "nt":
+            input_path = "CONIN$"
+            output_path = "CONOUT$"
+        else:
+            input_path = "/dev/tty"
+            output_path = "/dev/tty"
+
+        try:
+            self.console_input = open(input_path, "r", encoding="utf-8", errors="replace")
+            self.console_output = open(output_path, "w", encoding="utf-8", errors="replace", buffering=1)
+        except OSError:
+            self.console_input = sys.stdin
+            self.console_output = sys.stdout
+
+        if not self.console_input.isatty():
+            fail("The console command requires an interactive terminal.")
+
+    def close_console_streams(self) -> None:
+        if self.console_input not in {sys.stdin, None}:
+            self.console_input.close()
+        if self.console_output not in {sys.stdout, None}:
+            self.console_output.close()
+
+    def prompt(self, message: str) -> str:
+        self.console_output.write(message)
+        self.console_output.flush()
+        raw_value = self.console_input.readline()
+        if raw_value == "":
+            raise EOFError
+        return raw_value.rstrip("\n")
 
     def set_difficulty(self, raw_value: str) -> bool:
         normalized = raw_value.strip().upper()
@@ -346,7 +476,7 @@ class LabConsole:
         self.current_difficulty = normalized
         return True
 
-    def start_producer(self) -> None:
+    def start_producer(self) -> bool:
         self.stop_producer()
         assert self.python_path is not None
 
@@ -354,22 +484,39 @@ class LabConsole:
         env = os.environ.copy()
         env["FACTORY_DIFFICULTY"] = self.current_difficulty
         RUNTIME_DIR.mkdir(exist_ok=True)
-        log_file = PRODUCER_LOG.open("w", encoding="utf-8")
-        self.producer_process = subprocess.Popen(
-            [str(self.python_path), str(REPO_ROOT / "python-producer" / "send_factory_data.py")],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-        )
-        PRODUCER_PID_FILE.write_text(str(self.producer_process.pid), encoding="utf-8")
-        time.sleep(2)
+        for _ in range(5):
+            self.producer_log_handle = PRODUCER_LOG.open("w", encoding="utf-8")
+            self.producer_process = subprocess.Popen(
+                [str(self.python_path), str(REPO_ROOT / "python-producer" / "send_factory_data.py")],
+                stdin=subprocess.DEVNULL,
+                stdout=self.producer_log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+            PRODUCER_PID_FILE.write_text(str(self.producer_process.pid), encoding="utf-8")
+            time.sleep(2)
 
-        if self.producer_process.poll() is not None:
-            fail(f"Producer failed to start. See {PRODUCER_LOG}")
+            if self.producer_process.poll() is None:
+                return True
+
+            self.close_producer_log_handle()
+            self.producer_process = None
+            if PRODUCER_PID_FILE.exists():
+                PRODUCER_PID_FILE.unlink()
+            time.sleep(2)
+
+        warn(f"Producer failed to start. See {PRODUCER_LOG}")
+        return False
+
+    def close_producer_log_handle(self) -> None:
+        if self.producer_log_handle is not None:
+            self.producer_log_handle.close()
+            self.producer_log_handle = None
 
     def stop_producer(self) -> None:
         if self.producer_process is None:
+            self.close_producer_log_handle()
             return
         if self.producer_process.poll() is None:
             self.producer_process.terminate()
@@ -381,6 +528,7 @@ class LabConsole:
         self.producer_process = None
         if PRODUCER_PID_FILE.exists():
             PRODUCER_PID_FILE.unlink()
+        self.close_producer_log_handle()
 
     def show_status(self) -> None:
         print()
@@ -428,6 +576,10 @@ class LabConsole:
         print("    Show the latest TaskManager log. print sink output appears here.")
         print("  producer-log")
         print("    Show the latest producer log.")
+        print("  producer-start [difficulty]")
+        print("    Start the producer. Example: producer-start REALISTIC")
+        print("  producer-stop")
+        print("    Stop the producer.")
         print("  difficulty")
         print("    Show the current producer difficulty.")
         print("  difficulty <level>")
@@ -504,6 +656,14 @@ class LabConsole:
         if command == "producer-log":
             self.show_producer_log()
             return True
+        if command == "producer-start":
+            if args and not self.set_difficulty(args[0]):
+                return True
+            self.start_producer()
+            return True
+        if command == "producer-stop":
+            self.stop_producer()
+            return True
         if command == "difficulty":
             if not args:
                 print(self.current_difficulty)
@@ -539,9 +699,10 @@ class LabConsole:
 
         while True:
             try:
-                raw_command = input("lab> ").strip()
+                raw_command = self.prompt("lab> ").strip()
             except EOFError:
-                print()
+                self.console_output.write("\n")
+                self.console_output.flush()
                 warn("Input stream was closed. Exiting the lab console.")
                 return
 
@@ -558,12 +719,16 @@ class LabConsole:
                 return
 
     def run(self) -> None:
-        if not sys.stdin.isatty():
-            fail("The console command requires an interactive terminal.")
+        self.setup_console_streams()
+
+        stop_stack(quiet=True)
+        shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
+        shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
+        shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
 
         self.python_path = setup_temp_python_env()
-        start_stack()
         self.stack_started = True
+        start_stack()
         self.start_producer()
         self.print_console_help()
         self.interactive_shell()

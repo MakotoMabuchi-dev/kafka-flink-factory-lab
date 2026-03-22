@@ -390,6 +390,7 @@ python3 scripts/lab_cli.py console
 - 起動後は `help` で使えるコマンド一覧を表示する
 - `watch` `run` `flink-log` `read-iceberg` などを対話的に実行できる
 - `difficulty REALISTIC` のように入力すると producer の難易度を切り替えられる
+- producer が起動していないときは `producer-start` や `producer-start REALISTIC` で再開できる
 - `exit` で終了し、環境を掃除する
 - 終了時にコンテナ、一時仮想環境、生成データを削除する
 
@@ -402,6 +403,7 @@ python3 scripts/lab_cli.py console
 - `flink-log`
 - `run iceberg`
 - `read-iceberg`
+- `producer-start REALISTIC`
 - `exit`
 
 ## Kafka topic
@@ -784,6 +786,7 @@ cd kafka-flink-factory-lab
 - `run iceberg` で Iceberg 保存ジョブを流し、`read-iceberg` で読み取る
 - `iceberg-files` で MinIO 上の Iceberg ファイルを見る
 - `difficulty REALISTIC` のようにして producer の難易度を変える
+- `producer-start REALISTIC` と `producer-stop` で producer を明示的に制御する
 - `exit` で環境ごと終了する
 
 このスクリプトを終了すると、次も自動で行います。

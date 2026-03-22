@@ -28,6 +28,7 @@ CREATE CATALOG lakehouse WITH (
     'client.region' = 'us-east-1'
 );
 
+CREATE DATABASE IF NOT EXISTS lakehouse.lab;
 USE CATALOG lakehouse;
 USE lab;
 
