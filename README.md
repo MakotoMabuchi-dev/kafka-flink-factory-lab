@@ -386,9 +386,23 @@ python3 scripts/lab_cli.py console
 - 一時的な Python 仮想環境を作る
 - 必要な依存パッケージを入れる
 - Kafka / Flink / MinIO / Iceberg REST を起動する
-- producer の難易度を選べるようにする
-- メニュー形式でジョブ実行、topic 確認、Iceberg 読み取りまで進める
+- producer を `IDEAL` で起動する
+- 起動後は `help` で使えるコマンド一覧を表示する
+- `watch` `run` `flink-log` `read-iceberg` などを対話的に実行できる
+- `difficulty REALISTIC` のように入力すると producer の難易度を切り替えられる
+- `exit` で終了し、環境を掃除する
 - 終了時にコンテナ、一時仮想環境、生成データを削除する
+
+最初に試しやすいコマンド:
+
+- `help`
+- `status`
+- `watch process-events 5`
+- `run detail`
+- `flink-log`
+- `run iceberg`
+- `read-iceberg`
+- `exit`
 
 ## Kafka topic
 
@@ -759,18 +773,18 @@ cd kafka-flink-factory-lab
 - 一時的な Python 仮想環境を作る
 - 必要な Python 依存を入れる
 - Kafka / Flink / MinIO / Iceberg REST を起動する
-- producer を難易度付きで起動する
-- メニュー形式で job 実行やデータ確認を選べるようにする
+- producer を `IDEAL` で起動する
+- `help` で確認できるコマンド型の対話コンソールを開く
 
-メニューからできる主な操作:
+主な操作:
 
-- `flink-test/sql/job.sql` の実行
-- `flink-test/sql/job_summary.sql` の実行
-- `flink-test/sql/job_summary_iceberg.sql` の実行
-- Iceberg テーブルの読み取り
-- Kafka topic の中身確認
-- Flink / Iceberg REST のログ確認
-- MinIO 上の Iceberg ファイル確認
+- `watch process-events 5` で Kafka topic の中身を見る
+- `run detail` で明細ジョブを流し、`flink-log` で整形結果を見る
+- `run summary` で製品単位の summary を作り、`flink-log` で確認する
+- `run iceberg` で Iceberg 保存ジョブを流し、`read-iceberg` で読み取る
+- `iceberg-files` で MinIO 上の Iceberg ファイルを見る
+- `difficulty REALISTIC` のようにして producer の難易度を変える
+- `exit` で環境ごと終了する
 
 このスクリプトを終了すると、次も自動で行います。
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -318,6 +319,7 @@ class LabConsole:
         self.current_difficulty = "IDEAL"
         self.producer_process: subprocess.Popen[str] | None = None
         self.python_path: Path | None = None
+        self.stack_started = False
 
     def cleanup(self) -> None:
         if self.cleanup_done:
@@ -327,32 +329,22 @@ class LabConsole:
         print()
         log("Cleaning up lab environment...")
         self.stop_producer()
-        stop_stack(quiet=True)
+        if self.stack_started:
+            stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
         shutil.rmtree(TEMP_VENV_DIR, ignore_errors=True)
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         log("Lab environment removed.")
 
-    def select_difficulty(self) -> None:
-        print()
-        print("Select producer difficulty:")
-        print("  1) IDEAL")
-        print("  2) BASIC_DISTURBANCE")
-        print("  3) REALISTIC")
-        print("  4) HARSH")
-        choice = input("> ").strip()
-
-        mapping = {
-            "1": "IDEAL",
-            "2": "BASIC_DISTURBANCE",
-            "3": "REALISTIC",
-            "4": "HARSH",
-            "": "IDEAL",
-        }
-        self.current_difficulty = mapping.get(choice, "IDEAL")
-        if choice not in mapping:
-            warn("Unknown selection. Using IDEAL.")
+    def set_difficulty(self, raw_value: str) -> bool:
+        normalized = raw_value.strip().upper()
+        allowed = {"IDEAL", "BASIC_DISTURBANCE", "REALISTIC", "HARSH"}
+        if normalized not in allowed:
+            warn("Unknown difficulty. Use IDEAL, BASIC_DISTURBANCE, REALISTIC, or HARSH.")
+            return False
+        self.current_difficulty = normalized
+        return True
 
     def start_producer(self) -> None:
         self.stop_producer()
@@ -405,10 +397,7 @@ class LabConsole:
             print("STOPPED")
 
     def show_producer_log(self) -> None:
-        if PRODUCER_LOG.exists():
-            print(PRODUCER_LOG.read_text(encoding="utf-8").splitlines()[-30:])
-        else:
-            log("Producer log not found yet.")
+        self.print_tail(PRODUCER_LOG)
 
     def print_tail(self, path: Path) -> None:
         if not path.exists():
@@ -418,71 +407,181 @@ class LabConsole:
         for line in lines[-30:]:
             print(line)
 
-    def menu(self) -> None:
-        while True:
-            print()
-            print("========================================")
-            print("Kafka Flink Factory Lab Console")
-            print("========================================")
-            print("1) Show system status")
-            print("2) Restart producer with different difficulty")
-            print("3) Show latest producer log")
-            print("4) Run detail print job")
-            print("5) Run summary print job")
-            print("6) Run Iceberg summary job")
-            print("7) Read Iceberg summary")
-            print("8) Show sample Kafka messages")
-            print("9) Show MinIO Iceberg files")
-            print("10) Show latest TaskManager log")
-            print("11) Show latest Iceberg REST log")
-            print("0) Exit and remove the environment")
-            choice = input("> ").strip()
-            print()
+    def print_console_help(self) -> None:
+        print()
+        print("Available commands:")
+        print("  help")
+        print("    Show this help.")
+        print("  status")
+        print("    Show containers, Flink jobs, and producer status.")
+        print("  topics")
+        print("    List Kafka topics.")
+        print("  watch <topic> [count]")
+        print("    Show Kafka messages from the beginning. Example: watch process-events 5")
+        print("  run detail")
+        print("    Run the detail print job. Check the result with flink-log.")
+        print("  run summary")
+        print("    Run the summary print job. Check the result with flink-log.")
+        print("  run iceberg")
+        print("    Run the Iceberg summary job.")
+        print("  flink-log")
+        print("    Show the latest TaskManager log. print sink output appears here.")
+        print("  producer-log")
+        print("    Show the latest producer log.")
+        print("  difficulty")
+        print("    Show the current producer difficulty.")
+        print("  difficulty <level>")
+        print("    Restart the producer with IDEAL, BASIC_DISTURBANCE, REALISTIC, or HARSH.")
+        print("  jobs")
+        print("    Show Flink jobs.")
+        print("  cancel-jobs")
+        print("    Cancel all running Flink jobs.")
+        print("  iceberg-files")
+        print("    Show files stored in MinIO for Iceberg.")
+        print("  iceberg-log")
+        print("    Show the latest Iceberg REST log.")
+        print("  read-iceberg")
+        print("    Query product_summary_iceberg from Iceberg.")
+        print("  exit")
+        print("    Stop and remove the lab environment.")
 
-            if choice == "1":
-                self.show_status()
-            elif choice == "2":
-                self.select_difficulty()
-                self.start_producer()
-            elif choice == "3":
-                self.print_tail(PRODUCER_LOG)
-            elif choice == "4":
-                cancel_running_jobs()
-                apply_sql(DEFAULT_SQL_JOB)
-            elif choice == "5":
-                cancel_running_jobs()
-                apply_sql(DEFAULT_SUMMARY_SQL_JOB)
-            elif choice == "6":
-                cancel_running_jobs()
-                apply_sql(DEFAULT_ICEBERG_SQL_JOB)
-            elif choice == "7":
-                read_iceberg(DEFAULT_ICEBERG_READ_SQL)
-            elif choice == "8":
-                topic = input("Select topic [sensor-a / sensor-b / process-events, default: process-events]\n> ").strip() or "process-events"
-                raw_count = input("How many messages? [default: 5]\n> ").strip() or "5"
-                watch_topic(topic, from_beginning=True, max_messages=int(raw_count))
-            elif choice == "9":
-                run(["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "find", "local/warehouse"], check=False)
-            elif choice == "10":
-                run(["docker", "logs", "--tail", "80", TASKMANAGER], check=False)
-            elif choice == "11":
-                run(["docker", "logs", "--tail", "80", ICEBERG_REST_CONTAINER], check=False)
-            elif choice == "0":
+    def handle_watch_command(self, args: list[str]) -> None:
+        topic = args[0] if args else "process-events"
+        count = 5
+        if len(args) >= 2:
+            try:
+                count = int(args[1])
+            except ValueError:
+                warn("Message count must be an integer.")
                 return
-            else:
-                warn("Unknown menu.")
+        watch_topic(topic, from_beginning=True, max_messages=count)
+
+    def handle_run_command(self, args: list[str]) -> None:
+        if not args:
+            warn("Specify one of: detail, summary, iceberg")
+            return
+
+        job_name = args[0].lower()
+        if job_name == "detail":
+            cancel_running_jobs()
+            apply_sql(DEFAULT_SQL_JOB)
+            return
+        if job_name == "summary":
+            cancel_running_jobs()
+            apply_sql(DEFAULT_SUMMARY_SQL_JOB)
+            return
+        if job_name == "iceberg":
+            cancel_running_jobs()
+            apply_sql(DEFAULT_ICEBERG_SQL_JOB)
+            return
+
+        warn("Unknown job. Use: run detail, run summary, or run iceberg.")
+
+    def execute_command(self, parts: list[str]) -> bool:
+        command = parts[0].lower()
+        args = parts[1:]
+
+        if command in {"exit", "quit"}:
+            return False
+        if command in {"help", "?"}:
+            self.print_console_help()
+            return True
+        if command == "status":
+            self.show_status()
+            return True
+        if command == "topics":
+            list_topics()
+            return True
+        if command == "watch":
+            self.handle_watch_command(args)
+            return True
+        if command == "run":
+            self.handle_run_command(args)
+            return True
+        if command in {"flink-log", "taskmanager-log"}:
+            run(["docker", "logs", "--tail", "80", TASKMANAGER], check=False)
+            return True
+        if command == "producer-log":
+            self.show_producer_log()
+            return True
+        if command == "difficulty":
+            if not args:
+                print(self.current_difficulty)
+                return True
+            if self.set_difficulty(args[0]):
+                self.start_producer()
+            return True
+        if command == "jobs":
+            flink_list()
+            return True
+        if command == "cancel-jobs":
+            cancel_running_jobs()
+            return True
+        if command == "iceberg-files":
+            run(["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "find", "local/warehouse"], check=False)
+            return True
+        if command == "iceberg-log":
+            run(["docker", "logs", "--tail", "80", ICEBERG_REST_CONTAINER], check=False)
+            return True
+        if command == "read-iceberg":
+            read_iceberg(DEFAULT_ICEBERG_READ_SQL)
+            return True
+
+        warn("Unknown command. Type 'help' to see the available commands.")
+        return True
+
+    def interactive_shell(self) -> None:
+        print()
+        print("Kafka Flink Factory Lab Console is ready.")
+        print(f"Producer difficulty: {self.current_difficulty}")
+        print("Type 'help' to see the available commands.")
+        print("Type 'exit' to stop and remove the environment.")
+
+        while True:
+            try:
+                raw_command = input("lab> ").strip()
+            except EOFError:
+                print()
+                warn("Input stream was closed. Exiting the lab console.")
+                return
+
+            if not raw_command:
+                continue
+
+            try:
+                parts = shlex.split(raw_command)
+            except ValueError as exc:
+                warn(f"Invalid command syntax: {exc}")
+                continue
+
+            if not self.execute_command(parts):
+                return
 
     def run(self) -> None:
+        if not sys.stdin.isatty():
+            fail("The console command requires an interactive terminal.")
+
         self.python_path = setup_temp_python_env()
         start_stack()
-        self.select_difficulty()
+        self.stack_started = True
         self.start_producer()
-        self.menu()
+        self.print_console_help()
+        self.interactive_shell()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Kafka Flink Factory Lab CLI")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        description="Kafka Flink Factory Lab CLI",
+        epilog=(
+            "Examples:\n"
+            "  python3 scripts/lab_cli.py console\n"
+            "  python3 scripts/lab_cli.py start\n"
+            "  python3 scripts/lab_cli.py apply-sql --file flink-test/sql/job_summary_iceberg.sql\n"
+            "  python3 scripts/lab_cli.py read-iceberg"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("start", help="Start Kafka, Flink, MinIO, and Iceberg REST")
     subparsers.add_parser("stop", help="Stop Kafka, Flink, MinIO, and Iceberg REST")
@@ -527,6 +626,12 @@ def run_foreground_producer(difficulty: str) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        print()
+        print("Suggested first command: python3 scripts/lab_cli.py console")
+        return
 
     if args.command == "start":
         start_stack()
