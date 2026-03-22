@@ -26,6 +26,8 @@ DROP TABLE IF EXISTS process_events_raw;
 DROP TABLE IF EXISTS product_summary_print;
 
 DROP VIEW IF EXISTS process_intervals;
+DROP VIEW IF EXISTS process1_intervals;
+DROP VIEW IF EXISTS process2_intervals;
 DROP VIEW IF EXISTS process1_sensor_events;
 DROP VIEW IF EXISTS process2_sensor_events;
 DROP VIEW IF EXISTS process1_summary;
@@ -44,7 +46,7 @@ CREATE TABLE sensor_a_raw (
     unit STRING,
     status STRING,
 
-    event_time AS CAST(REPLACE(SUBSTRING(event_time_str, 1, 19), 'T', ' ') AS TIMESTAMP(3)),
+    event_time AS CAST(REPLACE(event_time_str, 'T', ' ') AS TIMESTAMP(6)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -63,7 +65,7 @@ CREATE TABLE sensor_b_raw (
     line STRING,
     status STRING,
 
-    event_time AS CAST(REPLACE(SUBSTRING(ts_str, 1, 19), 'T', ' ') AS TIMESTAMP(3)),
+    event_time AS CAST(REPLACE(ts_str, 'T', ' ') AS TIMESTAMP(6)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -82,7 +84,7 @@ CREATE TABLE process_events_raw (
     equipment_id STRING,
     reason STRING,
 
-    event_time AS CAST(REPLACE(SUBSTRING(event_time_str, 1, 19), 'T', ' ') AS TIMESTAMP(3)),
+    event_time AS CAST(REPLACE(event_time_str, 'T', ' ') AS TIMESTAMP(6)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -111,6 +113,30 @@ GROUP BY
     process,
     equipment_id;
 
+CREATE VIEW process1_intervals AS
+SELECT
+    serial_no,
+    equipment_id,
+    process_start,
+    process_end,
+    has_reason_flag
+FROM process_intervals
+WHERE process = 'process_1'
+AND process_start IS NOT NULL
+AND process_end IS NOT NULL;
+
+CREATE VIEW process2_intervals AS
+SELECT
+    serial_no,
+    equipment_id,
+    process_start,
+    process_end,
+    has_reason_flag
+FROM process_intervals
+WHERE process = 'process_2'
+AND process_start IS NOT NULL
+AND process_end IS NOT NULL;
+
 -- ============================================
 -- 工程1 × sensor-a
 -- ============================================
@@ -126,10 +152,9 @@ SELECT
     a.value_vibration,
     a.status AS sensor_status,
     p.has_reason_flag
-FROM process_intervals p
-JOIN sensor_a_raw a
-ON p.process = 'process_1'
-AND a.unit = p.equipment_id
+FROM process1_intervals p
+LEFT JOIN sensor_a_raw a
+ON a.unit = p.equipment_id
 AND a.event_time BETWEEN p.process_start AND p.process_end;
 
 -- ============================================
@@ -147,10 +172,9 @@ SELECT
     b.`current` AS current_value,
     b.status AS sensor_status,
     p.has_reason_flag
-FROM process_intervals p
-JOIN sensor_b_raw b
-ON p.process = 'process_2'
-AND b.line = p.equipment_id
+FROM process2_intervals p
+LEFT JOIN sensor_b_raw b
+ON b.line = p.equipment_id
 AND b.event_time BETWEEN p.process_start AND p.process_end;
 
 -- ============================================
@@ -167,8 +191,8 @@ SELECT
     AVG(value_temp) AS avg_temp_a,
     MAX(value_temp) AS max_temp_a,
     AVG(value_vibration) AS avg_vibration_a,
-    COUNT(*) AS cnt_sensor_a,
-    MAX(CASE WHEN sensor_status <> 'RUNNING' THEN 1 ELSE 0 END) AS process_1_has_non_running_status,
+    COUNT(sensor_time) AS cnt_sensor_a,
+    MAX(CASE WHEN sensor_status IS NOT NULL AND sensor_status <> 'RUNNING' THEN 1 ELSE 0 END) AS process_1_has_non_running_status,
     MAX(has_reason_flag) AS process_1_has_reason_flag
 FROM process1_sensor_events
 GROUP BY
@@ -189,8 +213,8 @@ SELECT
     AVG(pressure) AS avg_pressure_b,
     MAX(pressure) AS max_pressure_b,
     AVG(current_value) AS avg_current_b,
-    COUNT(*) AS cnt_sensor_b,
-    MAX(CASE WHEN sensor_status <> 'RUNNING' THEN 1 ELSE 0 END) AS process_2_has_non_running_status,
+    COUNT(sensor_time) AS cnt_sensor_b,
+    MAX(CASE WHEN sensor_status IS NOT NULL AND sensor_status <> 'RUNNING' THEN 1 ELSE 0 END) AS process_2_has_non_running_status,
     MAX(has_reason_flag) AS process_2_has_reason_flag
 FROM process2_sensor_events
 GROUP BY
@@ -223,10 +247,10 @@ SELECT
     p2.cnt_sensor_b,
 
     CASE
-        WHEN p1.process_1_has_non_running_status = 1
-          OR p2.process_2_has_non_running_status = 1
-          OR p1.process_1_has_reason_flag = 1
-          OR p2.process_2_has_reason_flag = 1
+        WHEN COALESCE(p1.process_1_has_non_running_status, 0) = 1
+          OR COALESCE(p2.process_2_has_non_running_status, 0) = 1
+          OR COALESCE(p1.process_1_has_reason_flag, 0) = 1
+          OR COALESCE(p2.process_2_has_reason_flag, 0) = 1
         THEN TRUE
         ELSE FALSE
     END AS has_disturbance
@@ -243,16 +267,16 @@ CREATE TABLE product_summary_print (
     serial_no STRING,
     equipment_id STRING,
 
-    process_1_start TIMESTAMP(3),
-    process_1_end TIMESTAMP(3),
+    process_1_start TIMESTAMP(6),
+    process_1_end TIMESTAMP(6),
     process_1_duration_sec BIGINT,
     avg_temp_a DOUBLE,
     max_temp_a DOUBLE,
     avg_vibration_a DOUBLE,
     cnt_sensor_a BIGINT,
 
-    process_2_start TIMESTAMP(3),
-    process_2_end TIMESTAMP(3),
+    process_2_start TIMESTAMP(6),
+    process_2_end TIMESTAMP(6),
     process_2_duration_sec BIGINT,
     avg_pressure_b DOUBLE,
     max_pressure_b DOUBLE,
