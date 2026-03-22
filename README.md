@@ -86,24 +86,67 @@ flowchart LR
 
 ## 重要な用語
 
-- Kafka
-  - イベントをためるメッセージ基盤です
-  - このリポジトリでは `sensor-a` `sensor-b` `process-events` の 3 topic を使います
-- Flink
-  - ストリーミング処理エンジンです
-  - Kafka から継続的にデータを読み、SQL で加工します
-- Iceberg
-  - データレイク向けのテーブル形式です
-  - Parquet などのファイルを「テーブル」として管理しやすくします
+IT に詳しくない人向けに、まずは「それぞれが何の担当か」で理解すると分かりやすいです。
+
+- Apache Kafka
+  - 何をするものか
+    - 工場から流れてくるイベントを受け取り、順番を保ちながらためておく仕組みです
+    - たとえると、現場から届く情報をいったん受け止める「高速な受付窓口」です
+  - このリポジトリでの役割
+    - `sensor-a` `sensor-b` `process-events` の 3 topic を受け持ちます
+  - 誰が開発しているか
+    - 現在は Apache Software Foundation のオープンソースプロジェクトです
+    - もともとは LinkedIn で Jay Kreps、Jun Rao、Neha Narkhede らが作り始めました
+
+- Apache Flink
+  - 何をするものか
+    - 流れてきたデータを止めずに、その場で計算する仕組みです
+    - たとえると、受付に届いた情報をリアルタイムで見て判断する「現場の分析係」です
+  - このリポジトリでの役割
+    - Kafka のイベントを読み、工程区間を作り、センサーデータを結合し、summary を作ります
+  - 誰が開発しているか
+    - 現在は Apache Software Foundation のオープンソースプロジェクトです
+    - もともとは Stratosphere という研究プロジェクトとして始まり、その後 Apache Flink になりました
+
+- Apache Iceberg
+  - 何をするものか
+    - 加工したデータを、あとで SQL で安全に読みやすい「テーブル」として保存する仕組みです
+    - 単なるファイル置き場ではなく、更新履歴や schema 変更も扱いやすくします
+  - このリポジトリでの役割
+    - Flink が作った結果を、分析しやすいテーブルとして保存するために使います
+  - 誰が開発しているか
+    - 現在は Apache Software Foundation のオープンソースプロジェクトです
+
 - MinIO
-  - S3 互換のオブジェクトストレージです
-  - Iceberg の Parquet や metadata JSON の保存先です
+  - 何をするものか
+    - 大きなデータファイルを保存するためのオブジェクトストレージです
+    - AWS S3 と似た使い方ができるので、ローカル学習環境でよく使われます
+  - このリポジトリでの役割
+    - Iceberg の Parquet や metadata JSON の保存先です
+  - 誰が開発しているか
+    - MinIO 社が開発しているオープンソース製品です
+    - 2014 年に Garima Kapoor、Anand Babu "AB" Periasamy、Harshavardhana らが創業しました
+
 - Catalog
-  - Iceberg テーブルの台帳です
-  - 「どのテーブルがどの metadata を使っているか」を管理します
+  - 何をするものか
+    - Iceberg テーブルの台帳です
+    - 「どのテーブルが、どの metadata を使っているか」を管理します
+  - たとえ
+    - MinIO が倉庫なら、Catalog は倉庫の在庫台帳です
+
 - Iceberg REST Catalog
-  - Catalog を HTTP API として公開したものです
-  - Flink や将来の Trino が共通で同じ Iceberg テーブルを参照できます
+  - 何をするものか
+    - Catalog を HTTP API として公開したものです
+  - このリポジトリでの役割
+    - Flink や将来の Trino が、同じ Iceberg テーブルを共通認識で扱えるようにします
+
+- ZooKeeper
+  - 何をするものか
+    - 分散システムの設定や状態をそろえるための仕組みです
+  - このリポジトリでの役割
+    - いまの Kafka 構成では、Kafka の補助コンポーネントとして使っています
+  - 補足
+    - 新しい Kafka では ZooKeeper を使わない構成も増えていますが、この学習環境では従来構成を使っています
 
 ## 全体構成
 
@@ -276,6 +319,160 @@ summary を見たい場合:
 - `process-events`
   - 製品シリアル単位の工程開始 / 終了イベント
   - `process_1` と `process_2` の start/end を送る
+
+## サンプルデータ
+
+このリポジトリでは、3つの topic に次のような JSON が流れます。
+
+### `sensor-a`
+
+工程 1 側のセンサー値です。
+
+```json
+{
+  "sensor_id": "A",
+  "event_time_str": "2026-03-22T10:00:01.123456",
+  "value_temp": 31.2,
+  "value_vibration": 0.42,
+  "unit": "machine-01",
+  "status": "RUNNING"
+}
+```
+
+意味:
+
+- `value_temp`
+  - 温度
+- `value_vibration`
+  - 振動
+- `unit`
+  - どの設備で出た値か
+- `status`
+  - 稼働状態
+
+### `sensor-b`
+
+工程 2 側のセンサー値です。
+
+```json
+{
+  "sensor_code": "B-01",
+  "ts_str": "2026-03-22T10:00:02.456789",
+  "pressure": 102.4,
+  "current": 8.7,
+  "line": "machine-01",
+  "status": "RUNNING"
+}
+```
+
+意味:
+
+- `pressure`
+  - 圧力
+- `current`
+  - 電流
+- `line`
+  - どの設備で出た値か
+- `status`
+  - 稼働状態
+
+### `process-events`
+
+製品単位の工程開始 / 工程終了イベントです。
+
+```json
+{
+  "serial_no": "SN00000123",
+  "process": "process_1",
+  "event_type": "start",
+  "event_time_str": "2026-03-22T10:00:00.000000",
+  "equipment_id": "machine-01",
+  "reason": null
+}
+```
+
+意味:
+
+- `serial_no`
+  - 製品シリアル番号
+- `process`
+  - どの工程か
+- `event_type`
+  - `start` または `end`
+- `equipment_id`
+  - どの設備で処理したか
+- `reason`
+  - 停止や乱れが含まれた場合の補助情報
+
+## Flink でどう結合されるか
+
+`sensor-a` と `sensor-b` は、製品シリアル番号を直接持っていません。
+そのため、Flink はまず `process-events` を基準にして、
+「どの製品が、いつからいつまで、その設備で処理されていたか」という工程区間を作ります。
+
+流れはこうです。
+
+1. `process-events` から `start` と `end` を集めて工程区間を作る
+2. `process_1` の区間には `sensor-a` を結び付ける
+3. `process_2` の区間には `sensor-b` を結び付ける
+4. 時刻がその区間の中に入っているセンサー値だけを採用する
+5. それを製品単位の明細や summary にまとめる
+
+イメージ:
+
+```text
+process-events:
+  SN00000123 / process_1 / start 10:00:00
+  SN00000123 / process_1 / end   10:00:10
+
+sensor-a:
+  machine-01 / 10:00:01 / temp=31.2
+  machine-01 / 10:00:05 / temp=31.5
+  machine-01 / 10:00:11 / temp=31.8
+
+Flink が結び付ける結果:
+  10:00:01 と 10:00:05 は process_1 の区間内なので採用
+  10:00:11 は区間外なので採用しない
+```
+
+この仕組みによって、
+「ただの時系列センサーデータ」だったものを、
+「ある製品が工程を通っていた間の設備状態」に変換できます。
+
+## このシミュレーターが再現する現実
+
+このリポジトリの producer は、理想状態だけでなく、
+現実の工場で起きるような乱れも段階的に再現できます。
+
+`python-producer/send_factory_data.py` には難易度設定があり、
+`CURRENT_DIFFICULTY` を切り替えるだけでシナリオを変えられます。
+
+用意している段階:
+
+- `IDEAL`
+  - 停止なし、欠損なし、遅延なしの理想状態
+- `BASIC_DISTURBANCE`
+  - 軽い停止、軽いドロップ、軽い遅延
+- `REALISTIC`
+  - 現実的な停止、欠損、ノイズ、送信遅延
+- `HARSH`
+  - 乱れがかなり大きい厳しい状態
+
+設定によって変わるもの:
+
+- 設備停止の発生確率
+- 停止時間の長さ
+- センサーイベントの欠損率
+- センサー値のノイズ量
+- 送信遅延の大きさ
+
+つまり、このシミュレーターは
+「理想的に動く工場」から
+「停止や欠損やノイズがある現実的な工場」までを切り替えて試せます。
+
+これにより、
+正常時の処理だけでなく、
+異常や乱れが混ざったときに summary や disturbance 判定がどう変わるかも学べます。
 
 ## まず動作確認したい人向けの重要コマンド
 
