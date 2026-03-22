@@ -103,7 +103,7 @@ summary ジョブを見たい場合は次を使います。
 - `sensor-a` を `process_1` 区間に join
 - `sensor-b` を `process_2` 区間に join
 - print sink に明細イベントを出力
-- Python 側の ISO 文字列に含まれる小数秒を保持して処理
+- Python 側の ISO 文字列からミリ秒精度で時刻を保持して処理
 
 ### `job_summary.sql`
 
@@ -111,7 +111,7 @@ summary ジョブを見たい場合は次を使います。
 - センサーイベントが 0 件でも製品行自体は残す
 - `cnt_sensor_a` / `cnt_sensor_b` で欠損状況を判定できる
 - disturbance は停止理由とセンサーステータスから算出
-- Python 側の小数秒を保持したまま集計
+- Python 側の時刻をミリ秒精度で保持したまま集計
 
 ## 動作確認
 

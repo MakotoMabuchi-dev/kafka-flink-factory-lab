@@ -46,7 +46,7 @@ CREATE TABLE sensor_a_raw (
     unit STRING,
     status STRING,
 
-    event_time AS CAST(REPLACE(event_time_str, 'T', ' ') AS TIMESTAMP(6)),
+    event_time AS TO_TIMESTAMP(SUBSTRING(REPLACE(event_time_str, 'T', ' '), 1, 23)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -65,7 +65,7 @@ CREATE TABLE sensor_b_raw (
     line STRING,
     status STRING,
 
-    event_time AS CAST(REPLACE(ts_str, 'T', ' ') AS TIMESTAMP(6)),
+    event_time AS TO_TIMESTAMP(SUBSTRING(REPLACE(ts_str, 'T', ' '), 1, 23)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -84,7 +84,7 @@ CREATE TABLE process_events_raw (
     equipment_id STRING,
     reason STRING,
 
-    event_time AS CAST(REPLACE(event_time_str, 'T', ' ') AS TIMESTAMP(6)),
+    event_time AS TO_TIMESTAMP(SUBSTRING(REPLACE(event_time_str, 'T', ' '), 1, 23)),
     WATERMARK FOR event_time AS event_time - INTERVAL '1' SECOND
 ) WITH (
     'connector' = 'kafka',
@@ -267,16 +267,16 @@ CREATE TABLE product_summary_print (
     serial_no STRING,
     equipment_id STRING,
 
-    process_1_start TIMESTAMP(6),
-    process_1_end TIMESTAMP(6),
+    process_1_start TIMESTAMP(3),
+    process_1_end TIMESTAMP(3),
     process_1_duration_sec BIGINT,
     avg_temp_a DOUBLE,
     max_temp_a DOUBLE,
     avg_vibration_a DOUBLE,
     cnt_sensor_a BIGINT,
 
-    process_2_start TIMESTAMP(6),
-    process_2_end TIMESTAMP(6),
+    process_2_start TIMESTAMP(3),
+    process_2_end TIMESTAMP(3),
     process_2_duration_sec BIGINT,
     avg_pressure_b DOUBLE,
     max_pressure_b DOUBLE,

@@ -63,7 +63,16 @@ echo "[INFO] Copying SQL file to container..."
 docker cp "${SQL_FILE}" "${CONTAINER_NAME}:${CONTAINER_SQL_PATH}"
 
 echo "[INFO] Executing SQL file with Flink SQL Client..."
-docker exec -it "${CONTAINER_NAME}" ./bin/sql-client.sh -f "${CONTAINER_SQL_PATH}"
+OUTPUT_FILE="$(mktemp)"
+trap 'rm -f "${OUTPUT_FILE}"' EXIT
+
+docker exec -i "${CONTAINER_NAME}" ./bin/sql-client.sh -f "${CONTAINER_SQL_PATH}" >"${OUTPUT_FILE}" 2>&1
+cat "${OUTPUT_FILE}"
+
+if grep -q "Could not execute SQL statement" "${OUTPUT_FILE}"; then
+    echo "[ERROR] Flink SQL execution failed." >&2
+    exit 1
+fi
 
 echo
 echo "========================================"
