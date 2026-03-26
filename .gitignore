@@ -9,3 +9,4 @@ __pycache__/
 .lab-runtime/
 flink-test/minio-data/
 flink-test/iceberg-rest-data/
+superset-test/

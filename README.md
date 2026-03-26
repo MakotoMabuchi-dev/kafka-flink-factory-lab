@@ -6,7 +6,7 @@ Kafka、Flink、MinIO、Iceberg REST Catalog をローカル Docker 上で動か
 現在は Kafka / Flink / MinIO / Iceberg REST Catalog に加えて、
 `trino-test/` の Trino 設定も含み、`lab_console` や `scripts/lab_cli.py` から
 Trino を起動して Iceberg を読める状態です。
-Superset はまだ同梱しておらず、次段階として手動で追加する前提です。
+Superset 本体は同梱しませんが、手動追加用の手順と overlay 雛形を含めています。
 
 この README では、背景説明より先に、
 すぐ試せる導線、`lab_console` の全コマンド説明、永続データの扱い、
@@ -24,6 +24,7 @@ Iceberg と Trino までの確認手順を追えるようにしています。
 - [Kafka topic とサンプルデータ](#kafka-and-sample-data)
 - [Iceberg に summary を保存して読む](#iceberg-read-write)
 - [Trino で Iceberg を読む](#trino-read)
+- [Superset を手動で追加する](#superset-add)
 - [典型的な作業フロー](#typical-workflow)
 - [よくあるトラブル](#troubleshooting)
 
@@ -74,6 +75,9 @@ python3 scripts/lab_cli.py trino-read
 ```bash
 python3 scripts/lab_cli.py trino-shell
 ```
+
+Superset まで進めるなら、ここまで確認したあとに
+[Superset を手動で追加する](#superset-add) の手順へ進みます。
 
 ### 2. まず全部まとめて触ってみる手順
 
@@ -267,8 +271,9 @@ flowchart LR
 - Trino
   - `trino-test/` の設定で、同じ Iceberg table を SQL で読む
 - Superset
-  - このリポジトリには未同梱
-  - 次段階として `Superset -> Trino -> Iceberg` の順に手動で接続する想定
+  - Superset 本体は vendoring しない
+  - `Superset -> Trino -> Iceberg` の順に手動で接続する想定
+  - `superset-local/` に shared network 参加用の overlay 雛形を置く
 
 <a id="implementation-status"></a>
 ## 現在の実装範囲
@@ -282,6 +287,7 @@ flowchart LR
 - `scripts/lab_cli.py trino-start` `trino-read` `trino-query` などで Trino を扱える
 - `scripts/lab_cli.py console` で対話コンソールを起動でき、Trino も自動起動する
 - `trino-test/` に Trino Compose と Iceberg catalog 設定がある
+- `superset-local/` に Superset 手動追加用の overlay 雛形がある
 
 重要:
 
@@ -323,6 +329,10 @@ flowchart LR
   - `scripts/lab_cli.py trino-start` と `lab_console` はこの Compose を使う
 - `trino-test/etc/catalog/iceberg.properties`
   - Trino から Iceberg REST Catalog と MinIO を読むための catalog 設定
+- `superset-local/docker-compose.lab.yml`
+  - 手動で clone した Superset を `stream-shared` network に参加させる overlay
+- `superset-local/README.md`
+  - Superset 手動追加の最小メモ
 - `start_all.sh` / `start_all.cmd`
   - 起動処理ラッパー
 - `stop_all.sh` / `stop_all.cmd`
@@ -1017,6 +1027,94 @@ python3 scripts/lab_cli.py trino-query "SELECT count(*) FROM iceberg.lab.product
 - 本表が `0 rows` の場合は接続エラーではなく、current snapshot に data file がない可能性が高い
 - `job_summary_iceberg.sql` は table を作り直すので、再実行直後は空 table に戻ることがある
 
+<a id="superset-add"></a>
+## Superset を手動で追加する
+
+Superset はこの repo に同梱しません。
+教育目的では、公式 repo を別ディレクトリに clone し、最小限のローカル差分だけ手で足す方が構成を理解しやすいです。
+
+### 1. 先にこの repo 側を起動する
+
+```bash
+cd kafka-flink-factory-lab
+python3 scripts/lab_cli.py start
+python3 scripts/lab_cli.py trino-start
+python3 scripts/lab_cli.py apply-sql --file flink-test/sql/job_summary_iceberg.sql
+python3 scripts/lab_cli.py trino-read
+```
+
+`python3 scripts/lab_cli.py trino-read` で結果が見えない状態では、Superset 側へ進んでも切り分けしづらいです。
+
+### 2. 公式 Superset を別ディレクトリへ clone する
+
+```bash
+cd /Users/makoto/docker-lab
+git clone --depth=1 https://github.com/apache/superset.git superset-test
+cd superset-test
+git fetch --depth=1 origin tag 6.0.0
+git checkout 6.0.0
+export TAG=6.0.0
+```
+
+この repo では `superset-test/` 自体は追跡しません。
+親 repo には local overlay の雛形だけ置いてあります。
+
+### 3. Trino ドライバを手で追加する
+
+`superset-test/docker/requirements-local.txt` を自分で作り、次だけ入れます。
+
+```text
+trino
+```
+
+### 4. shared network 参加用 overlay を置く
+
+この repo の [superset-local/docker-compose.lab.yml](superset-local/docker-compose.lab.yml) を
+`superset-test/docker-compose.lab.yml` として置きます。
+
+この overlay は `superset` `superset-worker` `superset-worker-beat` `superset-init` を
+`stream-shared` network に参加させ、Trino コンテナ名 `trino` を名前解決できる状態にします。
+
+### 5. Superset を起動する
+
+```bash
+cd /Users/makoto/docker-lab/superset-test
+docker compose -f docker-compose-image-tag.yml -f docker-compose.lab.yml up -d
+```
+
+初期化状況は次で確認します。
+
+```bash
+docker compose -f docker-compose-image-tag.yml -f docker-compose.lab.yml ps
+docker logs superset_init
+```
+
+通常は `http://localhost:8088` にアクセスできます。
+
+### 6. Superset UI で Trino を追加する
+
+`Settings -> Data: Database Connections -> + DATABASE` から追加します。
+
+接続 URI の最小例:
+
+```text
+trino://trino@trino:8080/iceberg
+```
+
+その後、SQL Lab で次を確認します。
+
+```sql
+SHOW SCHEMAS FROM iceberg;
+SHOW TABLES FROM iceberg.lab;
+SELECT * FROM iceberg.lab.product_summary_iceberg LIMIT 20;
+SELECT * FROM iceberg.lab."product_summary_iceberg$history";
+```
+
+### 7. Dataset と chart を作る
+
+まずは `lab.product_summary_iceberg` を Dataset として追加し、
+`has_disturbance` 件数や `equipment_id` 別件数を chart にするのが理解しやすいです。
+
 <a id="typical-workflow"></a>
 ## 典型的な作業フロー
 
@@ -1149,5 +1247,5 @@ python3 scripts/lab_cli.py trino-query "SELECT count(*) FROM iceberg.lab.product
 - 既存の Flink ジョブは自動停止しない
 - ジョブを切り替えるときは `flink list` で job id を見て明示的に cancel する
 - MinIO の認証情報 `minioadmin / minioadmin` は学習用の固定値であり、ローカル用途前提
-- このリポジトリには Trino の学習用設定が含まれるが、Superset はまだ含まれない
+- このリポジトリには Trino の学習用設定と Superset 手動追加用の雛形が含まれる
 - Superset までつなぐときは、Trino を介して Superset から Iceberg table を読む構成が自然
