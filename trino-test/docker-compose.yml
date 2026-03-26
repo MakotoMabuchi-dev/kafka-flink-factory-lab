@@ -1,0 +1,14 @@
+services:
+  trino:
+    image: trinodb/trino:479
+    container_name: trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./etc/catalog:/etc/trino/catalog
+    networks:
+      - stream-shared
+
+networks:
+  stream-shared:
+    external: true

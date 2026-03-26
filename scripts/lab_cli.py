@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -124,13 +126,17 @@ def wait_for_container(container_name: str, retries: int = 30) -> None:
     fail(f"Container '{container_name}' did not start in time.")
 
 
-def ensure_container_running(container_name: str) -> None:
+def container_is_running(container_name: str) -> bool:
     result = run(
         ["docker", "ps", "--format", "{{.Names}}"],
         capture_output=True,
         check=False,
     )
-    if container_name not in set(result.stdout.splitlines()):
+    return container_name in set(result.stdout.splitlines())
+
+
+def ensure_container_running(container_name: str) -> None:
+    if not container_is_running(container_name):
         fail(f"Container '{container_name}' is not running.")
 
 
@@ -345,6 +351,146 @@ SHOW TABLES;
     execute_sql_file(sql_path, "/opt/flink/read_iceberg_summary.sql")
 
 
+def load_iceberg_catalog_entries() -> list[sqlite3.Row]:
+    catalog_db = FLINK_DIR / "iceberg-rest-data" / "catalog.db"
+    if not catalog_db.exists():
+        return []
+
+    with sqlite3.connect(catalog_db) as connection:
+        connection.row_factory = sqlite3.Row
+        return list(
+            connection.execute(
+                """
+                SELECT
+                    catalog_name,
+                    table_namespace,
+                    table_name,
+                    metadata_location,
+                    previous_metadata_location,
+                    iceberg_type
+                FROM iceberg_tables
+                ORDER BY table_namespace, table_name
+                """
+            )
+        )
+
+
+def s3_uri_to_mc_path(s3_uri: str) -> str | None:
+    if not s3_uri.startswith("s3://"):
+        return None
+    return f"local/{s3_uri.removeprefix('s3://')}"
+
+
+def read_minio_text(mc_path: str) -> str | None:
+    if not container_is_running(MC_CONTAINER):
+        return None
+
+    result = run(
+        ["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "cat", mc_path],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def list_minio_objects(mc_prefix: str) -> list[str]:
+    if not container_is_running(MC_CONTAINER):
+        return []
+
+    result = run(
+        ["docker", "exec", MC_CONTAINER, "/usr/bin/mc", "find", mc_prefix],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def inspect_iceberg() -> None:
+    minio_data_dir = FLINK_DIR / "minio-data"
+    catalog_db = FLINK_DIR / "iceberg-rest-data" / "catalog.db"
+
+    print("=== Iceberg Persistence ===")
+    print(f"MinIO data dir: {minio_data_dir}")
+    print(f"  exists: {'yes' if minio_data_dir.exists() else 'no'}")
+    print(f"Catalog DB: {catalog_db}")
+    print(f"  exists: {'yes' if catalog_db.exists() else 'no'}")
+
+    try:
+        entries = load_iceberg_catalog_entries()
+    except sqlite3.Error as exc:
+        warn(f"Failed to read Iceberg catalog DB: {exc}")
+        return
+
+    print()
+    print("=== Iceberg Catalog ===")
+    if not entries:
+        print("No Iceberg tables are registered yet. Run 'run iceberg' first.")
+        return
+
+    for entry in entries:
+        table_prefix = f"local/warehouse/{entry['table_namespace']}/{entry['table_name']}"
+        print(f"Table: {entry['table_namespace']}.{entry['table_name']} ({entry['iceberg_type']})")
+        print(f"Catalog: {entry['catalog_name']}")
+        print(f"Metadata: {entry['metadata_location']}")
+        if entry["previous_metadata_location"]:
+            print(f"Previous metadata: {entry['previous_metadata_location']}")
+
+        metadata_location = entry["metadata_location"] or ""
+        metadata_path = s3_uri_to_mc_path(metadata_location)
+        metadata_text = read_minio_text(metadata_path) if metadata_path else None
+        if metadata_text is not None:
+            try:
+                metadata = json.loads(metadata_text)
+            except json.JSONDecodeError as exc:
+                warn(f"Failed to parse Iceberg metadata JSON: {exc}")
+            else:
+                properties = metadata.get("properties", {})
+                snapshots = metadata.get("snapshots", [])
+                current_snapshot_id = metadata.get("current-snapshot-id")
+                current_snapshot = next(
+                    (item for item in snapshots if item.get("snapshot-id") == current_snapshot_id),
+                    None,
+                )
+                current_summary = current_snapshot.get("summary", {}) if current_snapshot else {}
+
+                print(
+                    "Format: "
+                    f"v{metadata.get('format-version')} / "
+                    f"{properties.get('write.format.default', 'unknown')}"
+                )
+                print(f"Current snapshot: {current_snapshot_id}")
+                print(f"Snapshots: {len(snapshots)}")
+                if current_summary:
+                    print(
+                        "Current totals: "
+                        f"records={current_summary.get('total-records', '?')} "
+                        f"data_files={current_summary.get('total-data-files', '?')} "
+                        f"delete_files={current_summary.get('total-delete-files', '?')}"
+                    )
+                    print(
+                        "Last commit: "
+                        f"operation={current_summary.get('operation', '?')} "
+                        f"checkpoint={current_summary.get('flink.max-committed-checkpoint-id', '?')} "
+                        f"job={current_summary.get('flink.job-id', '?')}"
+                    )
+
+        objects = list_minio_objects(table_prefix)
+        if objects:
+            print("Objects:")
+            for object_path in objects:
+                print(f"  {object_path}")
+        else:
+            print("Objects: not available yet.")
+
+        print()
+
+    print("Hint: use 'read-iceberg' to print the stored rows.")
+
+
 def watch_topic(topic: str, *, from_beginning: bool = False, max_messages: int | None = None) -> None:
     if topic == "all":
         list_topics()
@@ -402,9 +548,28 @@ def setup_temp_python_env() -> Path:
         venv.EnvBuilder(with_pip=True).create(str(TEMP_VENV_DIR))
 
     python_path = venv_python_path(TEMP_VENV_DIR)
+    check_result = run(
+        [str(python_path), "-c", "import kafka"],
+        capture_output=True,
+        check=False,
+    )
+    if check_result.returncode == 0:
+        return python_path
+
     log("Installing Python dependencies...")
-    run([str(python_path), "-m", "pip", "install", "--upgrade", "pip"])
-    run([str(python_path), "-m", "pip", "install", "-r", str(REPO_ROOT / "requirements.txt")])
+    run(
+        [
+            str(python_path),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--retries",
+            "0",
+            "-r",
+            str(REPO_ROOT / "requirements.txt"),
+        ]
+    )
     return python_path
 
 
@@ -478,7 +643,13 @@ class LabConsole:
 
     def start_producer(self) -> bool:
         self.stop_producer()
-        assert self.python_path is not None
+        if self.python_path is None:
+            try:
+                self.python_path = setup_temp_python_env()
+            except subprocess.CalledProcessError as exc:
+                warn("Python producer dependencies could not be prepared. Producer commands are unavailable.")
+                warn(f"Failed command: {' '.join(exc.cmd)}")
+                return False
 
         log(f"Starting producer with difficulty {self.current_difficulty}...")
         env = os.environ.copy()
@@ -592,6 +763,8 @@ class LabConsole:
         print("    Show files stored in MinIO for Iceberg.")
         print("  iceberg-log")
         print("    Show the latest Iceberg REST log.")
+        print("  inspect-iceberg")
+        print("    Show Iceberg catalog metadata, snapshots, and MinIO objects.")
         print("  read-iceberg")
         print("    Query product_summary_iceberg from Iceberg.")
         print("  exit")
@@ -683,6 +856,9 @@ class LabConsole:
         if command == "iceberg-log":
             run(["docker", "logs", "--tail", "80", ICEBERG_REST_CONTAINER], check=False)
             return True
+        if command == "inspect-iceberg":
+            inspect_iceberg()
+            return True
         if command == "read-iceberg":
             read_iceberg(DEFAULT_ICEBERG_READ_SQL)
             return True
@@ -726,10 +902,10 @@ class LabConsole:
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
 
-        self.python_path = setup_temp_python_env()
         self.stack_started = True
         start_stack()
-        self.start_producer()
+        if not self.start_producer():
+            warn("Console started without the Python producer. Use 'producer-start' to retry later.")
         self.print_console_help()
         self.interactive_shell()
 
@@ -756,6 +932,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     apply_sql_parser = subparsers.add_parser("apply-sql", help="Apply a Flink SQL file")
     apply_sql_parser.add_argument("--file", dest="sql_file")
+
+    subparsers.add_parser("inspect-iceberg", help="Show Iceberg catalog metadata and storage files")
 
     read_parser = subparsers.add_parser("read-iceberg", help="Read Iceberg summary")
     read_parser.add_argument("--file", dest="sql_file")
@@ -821,6 +999,10 @@ def main() -> None:
     if args.command == "apply-sql":
         sql_path = resolve_sql_path(args.sql_file, DEFAULT_SQL_JOB)
         apply_sql(sql_path)
+        return
+
+    if args.command == "inspect-iceberg":
+        inspect_iceberg()
         return
 
     if args.command == "read-iceberg":
