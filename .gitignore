@@ -10,3 +10,4 @@ __pycache__/
 flink-test/minio-data/
 flink-test/iceberg-rest-data/
 superset-test/
+superset-local/data/

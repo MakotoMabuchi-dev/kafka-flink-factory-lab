@@ -7,6 +7,7 @@ import os
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -20,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 KAFKA_DIR = REPO_ROOT / "kafka-test"
 FLINK_DIR = REPO_ROOT / "flink-test"
 TRINO_DIR = REPO_ROOT / "trino-test"
+SUPERSET_DIR = REPO_ROOT / "superset-local"
 FLINK_SQL_DIR = FLINK_DIR / "sql"
 TEMP_VENV_DIR = REPO_ROOT / ".lab-venv"
 RUNTIME_DIR = REPO_ROOT / ".lab-runtime"
@@ -34,6 +36,7 @@ MINIO_CONTAINER = "minio"
 MC_CONTAINER = "mc"
 ICEBERG_REST_CONTAINER = "iceberg-rest"
 TRINO_CONTAINER = "trino"
+SUPERSET_CONTAINER = "superset"
 
 DEFAULT_SQL_JOB = FLINK_SQL_DIR / "job.sql"
 DEFAULT_SUMMARY_SQL_JOB = FLINK_SQL_DIR / "job_summary.sql"
@@ -42,6 +45,12 @@ DEFAULT_ICEBERG_READ_SQL = FLINK_SQL_DIR / "read_iceberg_summary.sql"
 DEFAULT_TRINO_READ_QUERY = "SELECT * FROM iceberg.lab.product_summary_iceberg LIMIT 20"
 DEFAULT_TRINO_HISTORY_QUERY = 'SELECT * FROM iceberg.lab."product_summary_iceberg$history"'
 DEFAULT_TRINO_SNAPSHOTS_QUERY = 'SELECT * FROM iceberg.lab."product_summary_iceberg$snapshots"'
+SUPERSET_DEFAULT_PORT = 8088
+SUPERSET_PORT_RANGE_END = 8098
+SUPERSET_DEFAULT_USERNAME = "admin"
+SUPERSET_DEFAULT_PASSWORD = "admin"
+SUPERSET_TRINO_DATABASE_NAME = "trino_iceberg_lab"
+SUPERSET_TRINO_SQLALCHEMY_URI = "trino://trino@trino:8080/iceberg"
 
 
 def log(message: str) -> None:
@@ -125,6 +134,24 @@ def ensure_trino_config() -> None:
         fail(f"Trino compose file not found: {compose_file}")
 
 
+def ensure_superset_config() -> None:
+    if not SUPERSET_DIR.exists():
+        fail(f"Superset directory not found: {SUPERSET_DIR}")
+    required_files = (
+        SUPERSET_DIR / "docker-compose.yml",
+        SUPERSET_DIR / "Dockerfile",
+        SUPERSET_DIR / "pythonpath" / "superset_config.py",
+        SUPERSET_DIR / "scripts" / "start_lab_superset.sh",
+    )
+    for path in required_files:
+        if not path.exists():
+            fail(f"Superset file not found: {path}")
+
+
+def ensure_superset_dirs() -> None:
+    (SUPERSET_DIR / "data").mkdir(parents=True, exist_ok=True)
+
+
 def wait_for_container(container_name: str, retries: int = 30) -> None:
     for _ in range(retries):
         result = run(
@@ -189,6 +216,96 @@ def wait_for_trino_ready(retries: int = 30) -> None:
             return
         time.sleep(2)
     fail("Trino did not become ready in time.")
+
+
+def container_health_status(container_name: str) -> str | None:
+    result = run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+            container_name,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def wait_for_superset_ready(retries: int = 60) -> None:
+    log("Waiting for Superset web UI...")
+    for _ in range(retries):
+        health = container_health_status(SUPERSET_CONTAINER)
+        if health == "healthy":
+            log("Superset is ready.")
+            return
+        time.sleep(2)
+    fail("Superset did not become ready in time.")
+
+
+def get_container_host_port(container_name: str, container_port: int) -> int | None:
+    result = run(
+        ["docker", "port", container_name, f"{container_port}/tcp"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+
+    first_line = result.stdout.splitlines()[0].strip()
+    host_port = first_line.rsplit(":", 1)[-1]
+    try:
+        return int(host_port)
+    except ValueError:
+        return None
+
+
+def port_is_available(port: int) -> bool:
+    bind_targets: list[tuple[int, tuple[object, ...]]] = [
+        (socket.AF_INET, ("0.0.0.0", port)),
+    ]
+    if socket.has_ipv6:
+        bind_targets.append((socket.AF_INET6, ("::", port, 0, 0)))
+
+    for family, address in bind_targets:
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(address)
+        except OSError:
+            sock.close()
+            return False
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return True
+
+
+def select_superset_host_port() -> int:
+    current_port = get_container_host_port(SUPERSET_CONTAINER, 8088)
+    if current_port is not None:
+        return current_port
+
+    for port in range(SUPERSET_DEFAULT_PORT, SUPERSET_PORT_RANGE_END + 1):
+        if port_is_available(port):
+            return port
+
+    fail(
+        "No free host port is available for Superset "
+        f"between {SUPERSET_DEFAULT_PORT} and {SUPERSET_PORT_RANGE_END}."
+    )
+
+
+def superset_url() -> str | None:
+    host_port = get_container_host_port(SUPERSET_CONTAINER, 8088)
+    if host_port is None:
+        return None
+    return f"http://localhost:{host_port}"
 
 
 def start_stack() -> None:
@@ -258,6 +375,94 @@ def stop_trino(*, quiet: bool = False) -> None:
     run(["docker", "compose", "down"], cwd=TRINO_DIR, check=False)
     if not quiet:
         log("Trino stopped.")
+
+
+def print_superset_access_info() -> None:
+    url = superset_url()
+    print(f"Superset UI: {url or 'not published yet'}")
+    print(f"Superset login: {SUPERSET_DEFAULT_USERNAME} / {SUPERSET_DEFAULT_PASSWORD}")
+    print(f"Superset DB: {SUPERSET_TRINO_DATABASE_NAME}")
+
+
+def start_superset() -> None:
+    wait_for_docker_daemon()
+    ensure_shared_network()
+    ensure_superset_config()
+    ensure_superset_dirs()
+    if not trino_is_ready():
+        warn("Trino is not ready yet. Start it with 'trino-start' so Superset queries can run.")
+    host_port = select_superset_host_port()
+    if host_port != SUPERSET_DEFAULT_PORT:
+        warn(f"Port {SUPERSET_DEFAULT_PORT} is already in use. Starting Superset on port {host_port} instead.")
+
+    log("Starting Superset...")
+    env = os.environ.copy()
+    env["SUPERSET_PORT"] = str(host_port)
+    run(["docker", "compose", "down"], cwd=SUPERSET_DIR, env=env, check=False)
+    run(["docker", "compose", "up", "-d", "--build"], cwd=SUPERSET_DIR, env=env)
+
+    wait_for_container(SUPERSET_CONTAINER)
+    wait_for_superset_ready()
+
+    log("Superset startup completed.")
+    print_superset_access_info()
+
+
+def stop_superset(*, quiet: bool = False) -> None:
+    ensure_superset_config()
+    if not quiet:
+        log("Stopping Superset...")
+    run(["docker", "compose", "down"], cwd=SUPERSET_DIR, check=False)
+    if not quiet:
+        log("Superset stopped.")
+
+
+def superset_is_ready() -> bool:
+    return container_health_status(SUPERSET_CONTAINER) == "healthy"
+
+
+def show_superset_status() -> None:
+    print("=== Superset ===")
+    if superset_is_ready():
+        url = superset_url() or "not published yet"
+        print(f"RUNNING (ready, {url})")
+        print(f"Login: {SUPERSET_DEFAULT_USERNAME} / {SUPERSET_DEFAULT_PASSWORD}")
+        print(f"Database: {SUPERSET_TRINO_DATABASE_NAME}")
+        return
+    if container_is_running(SUPERSET_CONTAINER):
+        print("STARTING")
+        return
+    print("STOPPED")
+
+
+def show_superset_log() -> None:
+    run(["docker", "logs", "--tail", "120", SUPERSET_CONTAINER], check=False)
+
+
+def open_url_in_browser(url: str) -> None:
+    if os.name == "nt":
+        os.startfile(url)  # type: ignore[attr-defined]
+        return
+
+    launcher = "open" if sys.platform == "darwin" else "xdg-open"
+    if shutil.which(launcher) is None:
+        warn(f"Browser launcher not found. Open this URL manually: {url}")
+        return
+
+    run([launcher, url], check=False, stdin=None)
+
+
+def open_superset() -> None:
+    if not container_is_running(SUPERSET_CONTAINER):
+        warn("Superset is not running. Start it with 'superset-start' first.")
+        print_superset_access_info()
+        return
+    print_superset_access_info()
+    url = superset_url()
+    if url is None:
+        warn("Superset is not published to a host port yet.")
+        return
+    open_url_in_browser(url)
 
 
 def create_topics() -> None:
@@ -687,10 +892,12 @@ class LabConsole:
         print()
         log("Cleaning up lab environment...")
         self.stop_producer()
+        stop_superset(quiet=True)
         stop_trino(quiet=True)
         stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
+        shutil.rmtree(SUPERSET_DIR / "data", ignore_errors=True)
         shutil.rmtree(TEMP_VENV_DIR, ignore_errors=True)
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
         self.close_console_streams()
@@ -812,6 +1019,8 @@ class LabConsole:
             print("STOPPED")
         print()
         show_trino_status()
+        print()
+        show_superset_status()
 
     def show_producer_log(self) -> None:
         self.print_tail(PRODUCER_LOG)
@@ -881,6 +1090,16 @@ class LabConsole:
         print('    Query iceberg.lab."product_summary_iceberg$snapshots" through Trino.')
         print("  trino-query <SQL>")
         print("    Run arbitrary SQL through Trino. Quote the SQL when it contains spaces or $.")
+        print("  superset-status")
+        print("    Show whether the Superset web UI is stopped, starting, or ready.")
+        print("  superset-start")
+        print("    Start Superset with the Trino connection preconfigured.")
+        print("  superset-stop")
+        print("    Stop Superset.")
+        print("  superset-log")
+        print("    Show the latest Superset container log.")
+        print("  superset-open")
+        print("    Open Superset in a browser and print the login information.")
         print("  exit")
         print("    Stop and remove the lab environment.")
 
@@ -1003,6 +1222,21 @@ class LabConsole:
                 return True
             run_trino_query(" ".join(args), check=False)
             return True
+        if command == "superset-status":
+            show_superset_status()
+            return True
+        if command == "superset-start":
+            start_superset()
+            return True
+        if command == "superset-stop":
+            stop_superset()
+            return True
+        if command == "superset-log":
+            show_superset_log()
+            return True
+        if command == "superset-open":
+            open_superset()
+            return True
 
         warn("Unknown command. Type 'help' to see the available commands.")
         return True
@@ -1038,15 +1272,18 @@ class LabConsole:
     def run(self) -> None:
         self.setup_console_streams()
 
+        stop_superset(quiet=True)
         stop_trino(quiet=True)
         stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
+        shutil.rmtree(SUPERSET_DIR / "data", ignore_errors=True)
         shutil.rmtree(RUNTIME_DIR, ignore_errors=True)
 
         self.stack_started = True
         start_stack()
         start_trino()
+        start_superset()
         if not self.start_producer():
             warn("Console started without the Python producer. Use 'producer-start' to retry later.")
         self.print_console_help()
@@ -1061,9 +1298,11 @@ def build_parser() -> argparse.ArgumentParser:
             "  python3 scripts/lab_cli.py console\n"
             "  python3 scripts/lab_cli.py start\n"
             "  python3 scripts/lab_cli.py trino-start\n"
+            "  python3 scripts/lab_cli.py superset-start\n"
             "  python3 scripts/lab_cli.py apply-sql --file flink-test/sql/job_summary_iceberg.sql\n"
             "  python3 scripts/lab_cli.py read-iceberg\n"
-            "  python3 scripts/lab_cli.py trino-query SELECT count(*) FROM iceberg.lab.product_summary_iceberg"
+            "  python3 scripts/lab_cli.py trino-query SELECT count(*) FROM iceberg.lab.product_summary_iceberg\n"
+            "  python3 scripts/lab_cli.py superset-open"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1094,6 +1333,12 @@ def build_parser() -> argparse.ArgumentParser:
     trino_query_parser = subparsers.add_parser("trino-query", help="Run SQL through Trino")
     trino_query_parser.add_argument("sql", nargs=argparse.REMAINDER)
 
+    subparsers.add_parser("superset-start", help="Start Superset with the Trino connection preconfigured")
+    subparsers.add_parser("superset-stop", help="Stop Superset")
+    subparsers.add_parser("superset-status", help="Show whether Superset is stopped, starting, or ready")
+    subparsers.add_parser("superset-log", help="Show the latest Superset log")
+    subparsers.add_parser("superset-open", help="Open Superset in a browser")
+
     watch_parser = subparsers.add_parser("watch-topic", help="Read Kafka topic messages")
     watch_parser.add_argument("topic", nargs="?", default="all")
     watch_parser.add_argument("--from-beginning", action="store_true")
@@ -1116,6 +1361,8 @@ def show_status() -> None:
     flink_list()
     print()
     show_trino_status()
+    print()
+    show_superset_status()
 
 
 def run_foreground_producer(difficulty: str) -> None:
@@ -1196,6 +1443,26 @@ def main() -> None:
         if not args.sql:
             fail("Provide SQL after 'trino-query'.")
         raise SystemExit(run_trino_query(" ".join(args.sql), check=False))
+
+    if args.command == "superset-start":
+        start_superset()
+        return
+
+    if args.command == "superset-stop":
+        stop_superset()
+        return
+
+    if args.command == "superset-status":
+        show_superset_status()
+        return
+
+    if args.command == "superset-log":
+        show_superset_log()
+        return
+
+    if args.command == "superset-open":
+        open_superset()
+        return
 
     if args.command == "watch-topic":
         watch_topic(args.topic, from_beginning=args.from_beginning, max_messages=args.max_messages)

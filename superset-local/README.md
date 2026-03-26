@@ -1,25 +1,23 @@
-# Superset Local Notes
+# Superset Local Stack
 
-This directory keeps only the local files needed to connect a manually cloned
-Apache Superset environment to the lab's shared Docker network.
+This directory contains a lightweight local Superset stack for the lab.
 
-It does not vendor the Superset source tree.
+It uses:
 
-Recommended flow:
+- `docker-compose.yml` to run a single Superset container on `http://localhost:8088`
+  - if `8088` is busy, the CLI can republish it on the next free port
+- `Dockerfile` to install the `trino` SQLAlchemy driver on top of `apache/superset:6.0.0`
+- `scripts/start_lab_superset.sh` to initialize Superset and upsert the Trino connection
+- `pythonpath/superset_config.py` for local metadata and cache settings
 
-1. Clone Apache Superset into a separate local directory such as `superset-test/`.
-2. Copy [docker-compose.lab.yml](docker-compose.lab.yml)
-   into the root of that clone.
-3. Create `docker/requirements-local.txt` in the Superset clone and add:
+Default login:
 
-```text
-trino
-```
+- username: `admin`
+- password: `admin`
 
-4. Start Superset with:
+Default database connection created on startup:
 
-```bash
-docker compose -f docker-compose-image-tag.yml -f docker-compose.lab.yml up -d
-```
+- name: `trino_iceberg_lab`
+- URI: `trino://trino@trino:8080/iceberg`
 
-The full step-by-step explanation lives in the main project README.
+Runtime metadata is stored in `superset-local/data/`.
