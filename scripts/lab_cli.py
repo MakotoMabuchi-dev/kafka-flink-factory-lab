@@ -51,6 +51,8 @@ SUPERSET_DEFAULT_USERNAME = "admin"
 SUPERSET_DEFAULT_PASSWORD = "admin"
 SUPERSET_TRINO_DATABASE_NAME = "trino_iceberg_lab"
 SUPERSET_TRINO_SQLALCHEMY_URI = "trino://trino@trino:8080/iceberg"
+SUPERSET_DEFAULT_DASHBOARD_TITLE = "Factory Lab Overview"
+SUPERSET_DEFAULT_DASHBOARD_SLUG = "factory-lab-overview"
 
 
 def log(message: str) -> None:
@@ -74,6 +76,7 @@ def run(
     capture_output: bool = False,
     check: bool = True,
     stdin: int | None = subprocess.DEVNULL,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -83,6 +86,7 @@ def run(
         text=True,
         capture_output=capture_output,
         check=check,
+        timeout=timeout,
     )
 
 
@@ -140,8 +144,13 @@ def ensure_superset_config() -> None:
     required_files = (
         SUPERSET_DIR / "docker-compose.yml",
         SUPERSET_DIR / "Dockerfile",
+        SUPERSET_DIR / "assets" / "metadata.yaml",
+        SUPERSET_DIR / "assets" / "databases" / "trino_iceberg_lab.yaml",
+        SUPERSET_DIR / "assets" / "datasets" / "trino_iceberg_lab" / "product_summary_iceberg.yaml",
+        SUPERSET_DIR / "assets" / "dashboards" / "Factory_Lab_Overview.yaml",
         SUPERSET_DIR / "pythonpath" / "superset_config.py",
         SUPERSET_DIR / "scripts" / "start_lab_superset.sh",
+        SUPERSET_DIR / "scripts" / "prepare_lab_bundle.py",
     )
     for path in required_files:
         if not path.exists():
@@ -152,8 +161,22 @@ def ensure_superset_dirs() -> None:
     (SUPERSET_DIR / "data").mkdir(parents=True, exist_ok=True)
 
 
-def wait_for_container(container_name: str, retries: int = 30) -> None:
-    for _ in range(retries):
+def container_status(container_name: str) -> str | None:
+    result = run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", container_name],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def wait_for_container(container_name: str, retries: int = 30, label: str | None = None) -> None:
+    wait_label = label or container_name
+    log(f"Waiting for {wait_label} container...")
+    last_status: str | None = None
+    for attempt in range(1, retries + 1):
         result = run(
             ["docker", "ps", "--format", "{{.Names}}"],
             capture_output=True,
@@ -161,7 +184,15 @@ def wait_for_container(container_name: str, retries: int = 30) -> None:
         )
         running = set(result.stdout.splitlines())
         if container_name in running:
+            log(f"{wait_label} container is running.")
             return
+        current_status = container_status(container_name)
+        if current_status and current_status != last_status:
+            log(f"{wait_label} container state: {current_status}")
+            last_status = current_status
+        elif attempt % 5 == 0:
+            status_text = current_status or "not created yet"
+            log(f"Still waiting for {wait_label} container... current state: {status_text}")
         time.sleep(2)
     fail(f"Container '{container_name}' did not start in time.")
 
@@ -205,16 +236,37 @@ def wait_for_kafka_ready(retries: int = 30) -> None:
 
 def wait_for_trino_ready(retries: int = 30) -> None:
     log("Waiting for Trino CLI...")
-    for _ in range(retries):
-        result = run(
-            ["docker", "exec", TRINO_CONTAINER, "trino", "--execute", "SELECT 1"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0:
+    last_error = ""
+    for attempt in range(1, retries + 1):
+        try:
+            result = run(
+                ["docker", "exec", TRINO_CONTAINER, "trino", "--execute", "SELECT 1"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            result = None
+            last_error = "Timed out while waiting for Trino CLI probe."
+        else:
+            combined = "\n".join(
+                text.strip()
+                for text in (result.stdout, result.stderr)
+                if text and text.strip()
+            )
+            if combined:
+                last_error = combined
+        if result is not None and result.returncode == 0:
             log("Trino is ready.")
             return
+        if attempt % 5 == 0:
+            log(f"Still waiting for Trino CLI... ({attempt}/{retries})")
         time.sleep(2)
+    if last_error:
+        warn("Last Trino readiness error:")
+        print(last_error, file=sys.stderr)
+        warn("Recent Trino log:")
+        run(["docker", "logs", "--tail", "80", TRINO_CONTAINER], check=False)
     fail("Trino did not become ready in time.")
 
 
@@ -308,6 +360,13 @@ def superset_url() -> str | None:
     return f"http://localhost:{host_port}"
 
 
+def superset_dashboard_url() -> str | None:
+    base_url = superset_url()
+    if base_url is None:
+        return None
+    return f"{base_url}/superset/dashboard/{SUPERSET_DEFAULT_DASHBOARD_SLUG}/"
+
+
 def start_stack() -> None:
     wait_for_docker_daemon()
     ensure_shared_network()
@@ -361,7 +420,7 @@ def start_trino() -> None:
     log("Starting Trino...")
     run(["docker", "compose", "up", "-d"], cwd=TRINO_DIR)
 
-    wait_for_container(TRINO_CONTAINER)
+    wait_for_container(TRINO_CONTAINER, label="Trino")
     wait_for_trino_ready()
 
     log("Trino startup completed.")
@@ -379,9 +438,11 @@ def stop_trino(*, quiet: bool = False) -> None:
 
 def print_superset_access_info() -> None:
     url = superset_url()
+    dashboard_url = superset_dashboard_url()
     print(f"Superset UI: {url or 'not published yet'}")
     print(f"Superset login: {SUPERSET_DEFAULT_USERNAME} / {SUPERSET_DEFAULT_PASSWORD}")
     print(f"Superset DB: {SUPERSET_TRINO_DATABASE_NAME}")
+    print(f"Superset dashboard: {dashboard_url or 'not published yet'}")
 
 
 def start_superset() -> None:
@@ -425,9 +486,11 @@ def show_superset_status() -> None:
     print("=== Superset ===")
     if superset_is_ready():
         url = superset_url() or "not published yet"
+        dashboard_url = superset_dashboard_url() or "not published yet"
         print(f"RUNNING (ready, {url})")
         print(f"Login: {SUPERSET_DEFAULT_USERNAME} / {SUPERSET_DEFAULT_PASSWORD}")
         print(f"Database: {SUPERSET_TRINO_DATABASE_NAME}")
+        print(f"Dashboard: {SUPERSET_DEFAULT_DASHBOARD_TITLE} ({dashboard_url})")
         return
     if container_is_running(SUPERSET_CONTAINER):
         print("STARTING")
@@ -458,7 +521,7 @@ def open_superset() -> None:
         print_superset_access_info()
         return
     print_superset_access_info()
-    url = superset_url()
+    url = superset_dashboard_url()
     if url is None:
         warn("Superset is not published to a host port yet.")
         return
@@ -1099,7 +1162,7 @@ class LabConsole:
         print("  superset-log")
         print("    Show the latest Superset container log.")
         print("  superset-open")
-        print("    Open Superset in a browser and print the login information.")
+        print("    Open the prebuilt Superset dashboard in a browser and print the login information.")
         print("  exit")
         print("    Stop and remove the lab environment.")
 

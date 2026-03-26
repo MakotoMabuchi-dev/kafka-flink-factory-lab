@@ -1,0 +1,39 @@
+slice_name: Recent Product Summary
+description: Latest raw rows currently stored in Iceberg for the Flink summary job.
+certified_by: null
+certification_details: null
+viz_type: table
+params:
+  adhoc_filters: []
+  all_columns:
+    - serial_no
+    - equipment_id
+    - has_disturbance
+    - process_1_duration_sec
+    - process_2_duration_sec
+    - cnt_sensor_a
+    - cnt_sensor_b
+  color_pn: false
+  datasource: 1__table
+  granularity_sqla: process_1_start
+  groupby: []
+  metrics:
+    - count
+  order_by_cols: []
+  order_desc: true
+  page_length: 25
+  percent_metrics: []
+  queryFields:
+    groupby: groupby
+    metrics: metrics
+  query_mode: raw
+  row_limit: 25
+  show_cell_bars: false
+  table_timestamp_format: smart_date
+  time_range: No filter
+  url_params: {}
+  viz_type: table
+cache_timeout: null
+uuid: 89b18bd3-3253-4cc9-8e44-e0a9a2f751b8
+version: 1.0.0
+dataset_uuid: 9af18d44-0e02-46ef-a0b1-3705d8f21161

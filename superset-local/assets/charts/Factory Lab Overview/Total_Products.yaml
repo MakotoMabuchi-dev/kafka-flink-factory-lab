@@ -1,0 +1,19 @@
+slice_name: Total Products
+description: Number of rows currently visible in the Iceberg table.
+certified_by: null
+certification_details: null
+viz_type: big_number_total
+params:
+  datasource: 1__table
+  viz_type: big_number_total
+  metric: count
+  adhoc_filters: []
+  header_font_size: 0.4
+  subheader: rows in iceberg.lab.product_summary_iceberg
+  subheader_font_size: 0.15
+  y_axis_format: SMART_NUMBER
+  extra_form_data: {}
+cache_timeout: null
+uuid: 3b4dcbec-1732-4ca8-85be-f7cf83361a95
+version: 1.0.0
+dataset_uuid: 9af18d44-0e02-46ef-a0b1-3705d8f21161

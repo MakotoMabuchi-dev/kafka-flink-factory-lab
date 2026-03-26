@@ -1,0 +1,17 @@
+database_name: __TRINO_DATABASE_NAME__
+sqlalchemy_uri: __TRINO_SQLALCHEMY_URI__
+cache_timeout: null
+expose_in_sqllab: true
+allow_run_async: false
+allow_ctas: false
+allow_cvas: false
+allow_dml: false
+allow_csv_upload: false
+extra:
+  metadata_params: {}
+  engine_params: {}
+  metadata_cache_timeout: {}
+  schemas_allowed_for_csv_upload: []
+impersonate_user: false
+uuid: __TRINO_DATABASE_UUID__
+version: 1.0.0

@@ -1,0 +1,32 @@
+slice_name: Disturbance Breakdown
+description: Count of rows grouped by whether the production summary marked a disturbance.
+certified_by: null
+certification_details: null
+viz_type: pie
+params:
+  adhoc_filters: []
+  color_scheme: supersetColors
+  datasource: 1__table
+  donut: true
+  granularity_sqla: process_1_start
+  groupby:
+    - has_disturbance
+  innerRadius: 42
+  labels_outside: true
+  metric: count
+  number_format: SMART_NUMBER
+  outerRadius: 70
+  label_type: key
+  queryFields:
+    groupby: groupby
+    metric: metrics
+  row_limit: null
+  show_labels: true
+  show_legend: true
+  time_range: No filter
+  url_params: {}
+  viz_type: pie
+cache_timeout: null
+uuid: 4a0f85f3-dad8-4ce6-8b31-0f4e463907d7
+version: 1.0.0
+dataset_uuid: 9af18d44-0e02-46ef-a0b1-3705d8f21161

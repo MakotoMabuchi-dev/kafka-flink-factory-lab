@@ -8,6 +8,7 @@ ADMIN_EMAIL="${ADMIN_EMAIL:-admin@example.com}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
 TRINO_DATABASE_NAME="${SUPERSET_TRINO_DATABASE_NAME:-trino_iceberg_lab}"
 TRINO_SQLALCHEMY_URI="${SUPERSET_TRINO_SQLALCHEMY_URI:-trino://trino@trino:8080/iceberg}"
+LAB_BUNDLE_DIR="${SUPERSET_LAB_RENDERED_BUNDLE_DIR:-/tmp/lab_bundle}"
 
 echo_step() {
   cat <<EOF
@@ -51,6 +52,10 @@ configure_trino_database() {
   superset set-database-uri --database-name "${TRINO_DATABASE_NAME}" --uri "${TRINO_SQLALCHEMY_URI}"
 }
 
+prepare_lab_bundle() {
+  python /app/lab-scripts/prepare_lab_bundle.py
+}
+
 mkdir -p /app/superset_home
 
 echo_step "Applying Superset metadata migrations"
@@ -65,6 +70,12 @@ superset init
 echo_step "Configuring Trino connection ${TRINO_DATABASE_NAME}"
 configure_trino_database
 
+echo_step "Preparing lab dashboard bundle"
+prepare_lab_bundle
+
+echo_step "Importing lab dashboard bundle"
+superset import-directory -o "${LAB_BUNDLE_DIR}"
+
 cat <<EOF
 
 Superset is ready for the lab.
@@ -72,6 +83,8 @@ URL: http://localhost:8088
 Login: ${ADMIN_USERNAME} / ${ADMIN_PASSWORD}
 Database connection: ${TRINO_DATABASE_NAME}
 SQLAlchemy URI: ${TRINO_SQLALCHEMY_URI}
+Dashboard: Factory Lab Overview
+Dashboard slug: factory-lab-overview
 
 EOF
 

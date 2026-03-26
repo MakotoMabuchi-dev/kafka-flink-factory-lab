@@ -1,0 +1,65 @@
+dashboard_title: Factory Lab Overview
+description: Prebuilt Superset dashboard for the local Kafka/Flink/Iceberg/Trino lab.
+css: null
+slug: factory-lab-overview
+uuid: e5dd4380-c137-41bb-b5ac-6555cb7b507e
+position:
+  CHART-TotalProducts:
+    children: []
+    id: CHART-TotalProducts
+    meta:
+      chartId: 101
+      height: 24
+      sliceName: Total Products
+      width: 4
+      uuid: 3b4dcbec-1732-4ca8-85be-f7cf83361a95
+    type: CHART
+  CHART-DisturbanceBreakdown:
+    children: []
+    id: CHART-DisturbanceBreakdown
+    meta:
+      chartId: 102
+      height: 24
+      sliceName: Disturbance Breakdown
+      width: 8
+      uuid: 4a0f85f3-dad8-4ce6-8b31-0f4e463907d7
+    type: CHART
+  CHART-RecentProductSummary:
+    children: []
+    id: CHART-RecentProductSummary
+    meta:
+      chartId: 103
+      height: 44
+      sliceName: Recent Product Summary
+      width: 12
+      uuid: 89b18bd3-3253-4cc9-8e44-e0a9a2f751b8
+    type: CHART
+  GRID_ID:
+    children:
+      - ROW-Overview
+      - ROW-RecentRows
+    id: GRID_ID
+    type: GRID
+  ROOT_ID:
+    children:
+      - GRID_ID
+    id: ROOT_ID
+    type: ROOT
+  ROW-Overview:
+    children:
+      - CHART-TotalProducts
+      - CHART-DisturbanceBreakdown
+    id: ROW-Overview
+    meta:
+      background: BACKGROUND_TRANSPARENT
+    type: ROW
+  ROW-RecentRows:
+    children:
+      - CHART-RecentProductSummary
+    id: ROW-RecentRows
+    meta:
+      background: BACKGROUND_TRANSPARENT
+    type: ROW
+  DASHBOARD_VERSION_KEY: v2
+metadata: {}
+version: 1.0.0
