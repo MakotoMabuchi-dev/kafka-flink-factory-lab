@@ -19,6 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KAFKA_DIR = REPO_ROOT / "kafka-test"
 FLINK_DIR = REPO_ROOT / "flink-test"
+TRINO_DIR = REPO_ROOT / "trino-test"
 FLINK_SQL_DIR = FLINK_DIR / "sql"
 TEMP_VENV_DIR = REPO_ROOT / ".lab-venv"
 RUNTIME_DIR = REPO_ROOT / ".lab-runtime"
@@ -32,11 +33,15 @@ TASKMANAGER = "flink-taskmanager"
 MINIO_CONTAINER = "minio"
 MC_CONTAINER = "mc"
 ICEBERG_REST_CONTAINER = "iceberg-rest"
+TRINO_CONTAINER = "trino"
 
 DEFAULT_SQL_JOB = FLINK_SQL_DIR / "job.sql"
 DEFAULT_SUMMARY_SQL_JOB = FLINK_SQL_DIR / "job_summary.sql"
 DEFAULT_ICEBERG_SQL_JOB = FLINK_SQL_DIR / "job_summary_iceberg.sql"
 DEFAULT_ICEBERG_READ_SQL = FLINK_SQL_DIR / "read_iceberg_summary.sql"
+DEFAULT_TRINO_READ_QUERY = "SELECT * FROM iceberg.lab.product_summary_iceberg LIMIT 20"
+DEFAULT_TRINO_HISTORY_QUERY = 'SELECT * FROM iceberg.lab."product_summary_iceberg$history"'
+DEFAULT_TRINO_SNAPSHOTS_QUERY = 'SELECT * FROM iceberg.lab."product_summary_iceberg$snapshots"'
 
 
 def log(message: str) -> None:
@@ -112,6 +117,14 @@ def ensure_bind_mount_dirs() -> None:
     (FLINK_DIR / "iceberg-rest-data").mkdir(parents=True, exist_ok=True)
 
 
+def ensure_trino_config() -> None:
+    if not TRINO_DIR.exists():
+        fail(f"Trino directory not found: {TRINO_DIR}")
+    compose_file = TRINO_DIR / "docker-compose.yml"
+    if not compose_file.exists():
+        fail(f"Trino compose file not found: {compose_file}")
+
+
 def wait_for_container(container_name: str, retries: int = 30) -> None:
     for _ in range(retries):
         result = run(
@@ -163,6 +176,21 @@ def wait_for_kafka_ready(retries: int = 30) -> None:
     fail("Kafka broker did not become ready in time.")
 
 
+def wait_for_trino_ready(retries: int = 30) -> None:
+    log("Waiting for Trino CLI...")
+    for _ in range(retries):
+        result = run(
+            ["docker", "exec", TRINO_CONTAINER, "trino", "--execute", "SELECT 1"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            log("Trino is ready.")
+            return
+        time.sleep(2)
+    fail("Trino did not become ready in time.")
+
+
 def start_stack() -> None:
     wait_for_docker_daemon()
     ensure_shared_network()
@@ -206,6 +234,30 @@ def stop_stack(*, quiet: bool = False) -> None:
 
     if not quiet:
         log("Stop completed.")
+
+
+def start_trino() -> None:
+    wait_for_docker_daemon()
+    ensure_shared_network()
+    ensure_trino_config()
+
+    log("Starting Trino...")
+    run(["docker", "compose", "up", "-d"], cwd=TRINO_DIR)
+
+    wait_for_container(TRINO_CONTAINER)
+    wait_for_trino_ready()
+
+    log("Trino startup completed.")
+    print("Trino UI: http://localhost:8080")
+
+
+def stop_trino(*, quiet: bool = False) -> None:
+    ensure_trino_config()
+    if not quiet:
+        log("Stopping Trino...")
+    run(["docker", "compose", "down"], cwd=TRINO_DIR, check=False)
+    if not quiet:
+        log("Trino stopped.")
 
 
 def create_topics() -> None:
@@ -491,6 +543,49 @@ def inspect_iceberg() -> None:
     print("Hint: use 'read-iceberg' to print the stored rows.")
 
 
+def trino_is_ready() -> bool:
+    if not container_is_running(TRINO_CONTAINER):
+        return False
+    result = run(
+        ["docker", "exec", TRINO_CONTAINER, "trino", "--execute", "SELECT 1"],
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def show_trino_status() -> None:
+    print("=== Trino ===")
+    if trino_is_ready():
+        print("RUNNING (ready, http://localhost:8080)")
+        return
+    if container_is_running(TRINO_CONTAINER):
+        print("STARTING")
+        return
+    print("STOPPED")
+
+
+def run_trino_query(sql_text: str, *, check: bool = True) -> int:
+    ensure_container_running(TRINO_CONTAINER)
+    result = run(
+        ["docker", "exec", TRINO_CONTAINER, "trino", "--execute", sql_text],
+        check=False,
+    )
+    if check and result.returncode != 0:
+        fail("Trino query failed.")
+    return result.returncode
+
+
+def open_trino_shell() -> int:
+    ensure_container_running(TRINO_CONTAINER)
+    result = run(
+        ["docker", "exec", "-it", TRINO_CONTAINER, "trino", "--catalog", "iceberg", "--schema", "lab"],
+        check=False,
+        stdin=None,
+    )
+    return result.returncode
+
+
 def watch_topic(topic: str, *, from_beginning: bool = False, max_messages: int | None = None) -> None:
     if topic == "all":
         list_topics()
@@ -592,6 +687,7 @@ class LabConsole:
         print()
         log("Cleaning up lab environment...")
         self.stop_producer()
+        stop_trino(quiet=True)
         stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
@@ -714,6 +810,8 @@ class LabConsole:
             print(f"RUNNING ({self.current_difficulty})")
         else:
             print("STOPPED")
+        print()
+        show_trino_status()
 
     def show_producer_log(self) -> None:
         self.print_tail(PRODUCER_LOG)
@@ -767,6 +865,22 @@ class LabConsole:
         print("    Show Iceberg catalog metadata, snapshots, and MinIO objects.")
         print("  read-iceberg")
         print("    Query product_summary_iceberg from Iceberg.")
+        print("  trino-status")
+        print("    Show whether the Trino container is stopped, starting, or ready.")
+        print("  trino-start")
+        print("    Start the Trino container connected to the shared lab network.")
+        print("  trino-stop")
+        print("    Stop the Trino container.")
+        print("  trino-shell")
+        print("    Open the interactive Trino CLI with catalog=iceberg schema=lab.")
+        print("  trino-read")
+        print("    Query product_summary_iceberg through Trino.")
+        print("  trino-history")
+        print('    Query iceberg.lab."product_summary_iceberg$history" through Trino.')
+        print("  trino-snapshots")
+        print('    Query iceberg.lab."product_summary_iceberg$snapshots" through Trino.')
+        print("  trino-query <SQL>")
+        print("    Run arbitrary SQL through Trino. Quote the SQL when it contains spaces or $.")
         print("  exit")
         print("    Stop and remove the lab environment.")
 
@@ -862,6 +976,33 @@ class LabConsole:
         if command == "read-iceberg":
             read_iceberg(DEFAULT_ICEBERG_READ_SQL)
             return True
+        if command == "trino-status":
+            show_trino_status()
+            return True
+        if command == "trino-start":
+            start_trino()
+            return True
+        if command == "trino-stop":
+            stop_trino()
+            return True
+        if command == "trino-shell":
+            open_trino_shell()
+            return True
+        if command == "trino-read":
+            run_trino_query(DEFAULT_TRINO_READ_QUERY, check=False)
+            return True
+        if command == "trino-history":
+            run_trino_query(DEFAULT_TRINO_HISTORY_QUERY, check=False)
+            return True
+        if command == "trino-snapshots":
+            run_trino_query(DEFAULT_TRINO_SNAPSHOTS_QUERY, check=False)
+            return True
+        if command == "trino-query":
+            if not args:
+                warn("Specify SQL after 'trino-query'.")
+                return True
+            run_trino_query(" ".join(args), check=False)
+            return True
 
         warn("Unknown command. Type 'help' to see the available commands.")
         return True
@@ -897,6 +1038,7 @@ class LabConsole:
     def run(self) -> None:
         self.setup_console_streams()
 
+        stop_trino(quiet=True)
         stop_stack(quiet=True)
         shutil.rmtree(FLINK_DIR / "minio-data", ignore_errors=True)
         shutil.rmtree(FLINK_DIR / "iceberg-rest-data", ignore_errors=True)
@@ -904,6 +1046,7 @@ class LabConsole:
 
         self.stack_started = True
         start_stack()
+        start_trino()
         if not self.start_producer():
             warn("Console started without the Python producer. Use 'producer-start' to retry later.")
         self.print_console_help()
@@ -917,8 +1060,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python3 scripts/lab_cli.py console\n"
             "  python3 scripts/lab_cli.py start\n"
+            "  python3 scripts/lab_cli.py trino-start\n"
             "  python3 scripts/lab_cli.py apply-sql --file flink-test/sql/job_summary_iceberg.sql\n"
-            "  python3 scripts/lab_cli.py read-iceberg"
+            "  python3 scripts/lab_cli.py read-iceberg\n"
+            "  python3 scripts/lab_cli.py trino-query SELECT count(*) FROM iceberg.lab.product_summary_iceberg"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -937,6 +1082,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     read_parser = subparsers.add_parser("read-iceberg", help="Read Iceberg summary")
     read_parser.add_argument("--file", dest="sql_file")
+
+    subparsers.add_parser("trino-start", help="Start Trino")
+    subparsers.add_parser("trino-stop", help="Stop Trino")
+    subparsers.add_parser("trino-status", help="Show whether Trino is stopped, starting, or ready")
+    subparsers.add_parser("trino-shell", help="Open the interactive Trino CLI")
+    subparsers.add_parser("trino-read", help="Query product_summary_iceberg through Trino")
+    subparsers.add_parser("trino-history", help='Query iceberg.lab."product_summary_iceberg$history"')
+    subparsers.add_parser("trino-snapshots", help='Query iceberg.lab."product_summary_iceberg$snapshots"')
+
+    trino_query_parser = subparsers.add_parser("trino-query", help="Run SQL through Trino")
+    trino_query_parser.add_argument("sql", nargs=argparse.REMAINDER)
 
     watch_parser = subparsers.add_parser("watch-topic", help="Read Kafka topic messages")
     watch_parser.add_argument("topic", nargs="?", default="all")
@@ -958,6 +1114,8 @@ def show_status() -> None:
     run(["docker", "ps", "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"], check=False)
     print()
     flink_list()
+    print()
+    show_trino_status()
 
 
 def run_foreground_producer(difficulty: str) -> None:
@@ -1009,6 +1167,35 @@ def main() -> None:
         sql_path = resolve_sql_path(args.sql_file, DEFAULT_ICEBERG_READ_SQL)
         read_iceberg(sql_path)
         return
+
+    if args.command == "trino-start":
+        start_trino()
+        return
+
+    if args.command == "trino-stop":
+        stop_trino()
+        return
+
+    if args.command == "trino-status":
+        show_trino_status()
+        return
+
+    if args.command == "trino-shell":
+        raise SystemExit(open_trino_shell())
+
+    if args.command == "trino-read":
+        raise SystemExit(run_trino_query(DEFAULT_TRINO_READ_QUERY, check=False))
+
+    if args.command == "trino-history":
+        raise SystemExit(run_trino_query(DEFAULT_TRINO_HISTORY_QUERY, check=False))
+
+    if args.command == "trino-snapshots":
+        raise SystemExit(run_trino_query(DEFAULT_TRINO_SNAPSHOTS_QUERY, check=False))
+
+    if args.command == "trino-query":
+        if not args.sql:
+            fail("Provide SQL after 'trino-query'.")
+        raise SystemExit(run_trino_query(" ".join(args.sql), check=False))
 
     if args.command == "watch-topic":
         watch_topic(args.topic, from_beginning=args.from_beginning, max_messages=args.max_messages)
